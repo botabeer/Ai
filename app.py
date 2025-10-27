@@ -6,18 +6,22 @@ from linebot.exceptions import InvalidSignatureError
 from dotenv import load_dotenv
 import google.generativeai as genai
 
+# تحميل المتغيرات من ملف .env
 load_dotenv()
 app = Flask(__name__)
 
+# مفاتيح البيئة
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# إعدادات LINE
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
+# إعداد Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-1.5-flash-latest")
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -33,8 +37,9 @@ def callback():
 def handle_message(event):
     user_text = event.message.text.strip()
 
-    if user_text.lower() in ["/help", "مساعدة"]:
-        ai_reply = "هذا بوت ذكاء اصطناعي. أرسل أي رسالة وسأرد عليك برد ذكي."
+    # أمر المساعدة
+    if user_text.lower() in ["مساعدة", "help", "/help"]:
+        ai_reply = "أنا بوت ذكاء اصطناعي. أرسل لي أي سؤال وسأجيبك بإجابة ذكية ومبسطة."
     else:
         try:
             response = model.generate_content(user_text)
