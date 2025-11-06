@@ -6,7 +6,6 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage, QuickRepl
 from linebot.exceptions import InvalidSignatureError
 from dotenv import load_dotenv
 import google.generativeai as genai
-import random
 
 # تحميل المتغيرات البيئية
 load_dotenv()
@@ -30,7 +29,7 @@ generation_config = {
     "temperature": 0.7,
     "top_p": 0.95,
     "top_k": 40,
-    "max_output_tokens": 1000,  # مختصر
+    "max_output_tokens": 2000,
 }
 
 # إعداد قاعدة البيانات
@@ -40,56 +39,11 @@ c = conn.cursor()
 c.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
-    mood TEXT,
-    progress_score INTEGER DEFAULT 0
+    nickname TEXT,
+    first_interaction INTEGER DEFAULT 1
 )
 """)
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS user_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT,
-    scenario TEXT,
-    choice TEXT,
-    analysis TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-""")
-
 conn.commit()
-
-# أمثلة مواقف يومية
-scenarios = [
-    {
-        "scenario": "أثناء اجتماع عمل، يحاول زميل مقاطعتك بطريقة حادة.",
-        "options": [
-            {"text": "الرد بغضب", "analysis": "يقلل الاحترام والكاريزما", "is_correct": False},
-            {"text": "التوقف بهدوء والرد لبقًا", "analysis": "يعزز الكاريزما والثقة", "is_correct": True},
-            {"text": "تجاهل المقاطعة", "analysis": "يحافظ على هدوءك ولكنه قد يفسر كضعف", "is_correct": True}
-        ]
-    },
-    {
-        "scenario": "فقدت صديقًا مقربًا وتشعر بالحزن والوحدة.",
-        "options": [
-            {"text": "الانعزال عن الجميع", "analysis": "قد يزيد شعور الحزن والوحدة", "is_correct": False},
-            {"text": "التحدث مع صديق موثوق أو مستشار", "analysis": "يعزز الذكاء العاطفي والدعم النفسي", "is_correct": True},
-            {"text": "الانشغال بالعمل أو الهوايات لتجنب التفكير", "analysis": "جزئيًا صحيح لكنه لا يحل المشاعر الأساسية", "is_correct": True}
-        ]
-    }
-]
-
-def generate_ai_response(prompt):
-    """توليد رد مختصر وودّي باستخدام Gemini AI"""
-    try:
-        response = model.generate_content(prompt, generation_config=generation_config)
-        text = response.text.strip()
-        # تقليل طول الرد
-        if len(text) > 400:
-            text = text[:400] + "..."
-        return text
-    except Exception as e:
-        print(f"Gemini API Error: {e}")
-        return "عذرًا، لم أتمكن من توليد رد الآن، حاول لاحقًا."
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -112,38 +66,48 @@ def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text.strip()
 
-    # بداية المحادثة بأسلوب غامض
+    # التحقق من وجود المستخدم في قاعدة البيانات
+    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    user = c.fetchone()
+
+    # أول مرة يرسل المستخدم المساعدة أو /start
     if user_text.lower() in ["مساعدة", "help", "/help", "/start"]:
-        ai_reply = "كيف تشعر اليوم؟"
+        if not user:
+            ai_reply = "لبيه! أنا صديقتك الجديدةأختار لي اسم تحبه؟!"
+            c.execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
+            conn.commit()
+        else:
+            ai_reply = "مرحبًا من جديد! تحب نبدأ بحوار اليوم؟"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
         return
 
-    # إرسال موقف اليوم
-    if user_text.lower() == "موقف اليوم":
-        scenario_obj = random.choice(scenarios)
-        quick_reply_buttons = QuickReply(items=[
-            QuickReplyButton(action=MessageAction(label=opt['text'], text=opt['text']))
-            for opt in scenario_obj['options']
-        ])
-        reply = TextSendMessage(
-            text=scenario_obj['scenario'],
-            quick_reply=quick_reply_buttons
-        )
-        line_bot_api.reply_message(event.reply_token, reply)
+    # إذا المستخدم يرسل اسمه لأول مرة
+    if user and user[2] == 1:  # first_interaction = 1
+        nickname = user_text
+        c.execute("UPDATE users SET nickname=?, first_interaction=0 WHERE user_id=?", (nickname, user_id))
+        conn.commit()
+        ai_reply = f"تمام! الحين صار لك اسم، {nickname}. كيف كان يومك اليوم؟ تحب تحكين لي شوي عن يومك؟"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
         return
 
-    # التعامل مع أي رد من المستخدم بأسلوب ودّي مختصر
+    # الردود العامة: تفاعل ذكاء اصطناعي ودّي
     prompt = f"""
-أنت صديق ودّي للمستخدم، ترد بأسلوب مختصر، مفيد، وكأنك تحاور شخصًا وجهًا لوجه.
-ركز على فهم شعوره وتعزيز ثقته بنفسه.
-المستخدم قال: {user_text}
+أنت صديقة ودية ومهتمة، تحاور المستخدم بأسلوب مختصر وواقعي، تركز على تعزيز ثقته بنفسه وتقوية شخصيته.
+المستخدم كتب: {user_text}
+أجب بأسلوب ودّي ولبق وكأنك صديقة مقربة، وادمج نصيحة قصيرة لتحسين النفس.
 """
-    ai_reply = generate_ai_response(prompt)
+    try:
+        response = model.generate_content(prompt, generation_config=generation_config)
+        ai_reply = response.text.strip()
+    except Exception as e:
+        print(f"Gemini API Error: {e}")
+        ai_reply = "عذرًا، حصل خطأ أثناء محاولة الرد، جرب مرة ثانية."
+
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE SmartSelf AI Bot is running!", 200
+    return "LINE FriendlyBot is running!", 200
 
 @app.route("/health", methods=["GET"])
 def health():
