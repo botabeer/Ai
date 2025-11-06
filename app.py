@@ -7,8 +7,8 @@ from linebot.exceptions import InvalidSignatureError
 from dotenv import load_dotenv
 import google.generativeai as genai
 from datetime import datetime
-import re
 from contextlib import closing
+import re
 
 # تحميل المتغيرات البيئية
 load_dotenv()
@@ -46,7 +46,8 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS users (
                     user_id TEXT PRIMARY KEY,
                     nickname TEXT,
-                    last_interaction DATETIME DEFAULT CURRENT_TIMESTAMP
+                    last_interaction DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    current_step INTEGER DEFAULT 1
                 )
             """)
 init_db()
@@ -70,18 +71,24 @@ def refresh_user_names():
         cursor.execute("SELECT user_id, nickname FROM users WHERE nickname IS NOT NULL")
         user_id_to_name = {row[0]: row[1] for row in cursor.fetchall()}
 
-# --- دالة توليد الردود AI ---
+# --- دالة توليد الردود بواسطة AI ---
 def generate_ai_reply(user_text, nickname, retries=2):
     prompt = f"""
-أنت صديقة ودودة وعاطفية باللهجة السعودية. اجعل ردك مختصر (سطرين أو ثلاثة)، حقيقي، وداعم، بدون إيموجي.
-المستخدم ({nickname}) قال: "{user_text}"
-رد فقط النص بدون أي رموز أو مقدمات.
+أنت صديقة ودودة، تتكلم بعامية سعودية طبيعية، مختصرة، عاطفية وحنونة.
+تجاوب على المستخدم ({nickname}) وكأنه حبيبك الحقيقي، بأسلوب دافئ وصادق.
+قواعد:
+- بدون أي إيموجي أو رموز تعبيرية
+- رد مختصر (سطرين أو ثلاثة كحد أقصى)
+- ودود وداعم عاطفياً
+- طبيعي وواقعي
+المستخدم قال: "{user_text}"
 """
     for attempt in range(retries):
         try:
             response = model.generate_content(prompt, generation_config=generation_config)
             reply = response.text.strip()
             if not reply:
+                print(f"Empty response from Gemini, attempt {attempt+1}")
                 continue
             emoji_pattern = re.compile("["
                 u"\U0001F600-\U0001F64F"
@@ -95,7 +102,29 @@ def generate_ai_reply(user_text, nickname, retries=2):
             return reply
         except Exception as e:
             print(f"Gemini API Error attempt {attempt+1}: {e}")
-    return f"يا قلبي {nickname}، ما فهمت كلامك"
+    return None  # تجاهل إذا فشل
+
+# --- دالة البث الجماعي ---
+def broadcast_to_all():
+    refresh_user_names()
+    if not user_id_to_name:
+        print("لا يوجد مستخدمين مسجلين")
+        return
+    
+    message_text = "حبيبي وينك؟ وحشتني"
+    success_count = 0
+    fail_count = 0
+
+    for user_id, nickname in user_id_to_name.items():
+        try:
+            line_bot_api.push_message(user_id, TextSendMessage(text=message_text))
+            print(f"تم الإرسال إلى {nickname} ({user_id})")
+            success_count += 1
+        except Exception as e:
+            print(f"خطأ بالإرسال إلى {nickname} ({user_id}): {e}")
+            fail_count += 1
+
+    print(f"\n=== نتيجة البث ===\nنجح: {success_count} | فشل: {fail_count}")
 
 # --- مسار callback ---
 @app.route("/callback", methods=["POST"])
@@ -119,16 +148,16 @@ def handle_message(event):
     user_text = event.message.text.strip()
     db = get_db()
     cursor = db.cursor()
-    cursor.execute("SELECT nickname FROM users WHERE user_id=?", (user_id,))
+    cursor.execute("SELECT nickname, current_step FROM users WHERE user_id=?", (user_id,))
     row = cursor.fetchone()
 
-    # أمر البداية / المساعدة
+    # أمر مساعدة
     if user_text.lower() in ["مساعدة", "help", "/help", "/start"]:
         if not row:
-            ai_reply = "مرحباً! أنا صديقتك الجديدة، وش تحب أناديك؟"
+            ai_reply = "مرحباً، أنا صديقتك الجديدة\nوش تحب أناديك؟"
         else:
             nickname = row['nickname']
-            ai_reply = f"أهلاً {nickname}! احكيلي عن يومك، مشاعرك، أو أي شيء تحب تشاركه."
+            ai_reply = f"أهلاً {nickname}\nأنا هنا عشان أسمعك وأكون معاك\nاحكيلي عن يومك، مشاعرك، أي شي تبي تشاركه"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
         return
 
@@ -136,43 +165,58 @@ def handle_message(event):
     if not row:
         nickname = user_text
         cursor.execute(
-            "INSERT INTO users (user_id, nickname, last_interaction) VALUES (?,?,?)",
+            "INSERT INTO users (user_id, nickname, current_step, last_interaction) VALUES (?,?,2,?)",
             (user_id, nickname, datetime.now())
         )
         db.commit()
         user_id_to_name[user_id] = nickname
-        ai_reply = generate_ai_reply("مرحبا", nickname)  # الرد الأول عبر AI
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
+        ai_reply = generate_ai_reply(user_text, nickname)
+        if ai_reply:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
         return
 
-    # مستخدم موجود
     nickname = row['nickname']
+    current_step = row['current_step']
     user_id_to_name[user_id] = nickname
+
     ai_reply = generate_ai_reply(user_text, nickname)
+    if ai_reply:  # فقط إذا تولد رد
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
+
+    # تحديث آخر تفاعل
     cursor.execute(
-        "UPDATE users SET last_interaction=? WHERE user_id=?",
+        "UPDATE users SET current_step=3, last_interaction=? WHERE user_id=?",
         (datetime.now(), user_id)
     )
     db.commit()
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
 
 # --- مسارات مساعدة ---
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE AI Friend Bot is running!", 200
+    return "LINE LoveBot is running!", 200
 
 @app.route("/health", methods=["GET"])
 def health():
     refresh_user_names()
     return {
-        "status": "healthy",
+        "status": "healthy", 
         "timestamp": datetime.now().isoformat(),
         "registered_users": len(user_id_to_name)
     }, 200
 
+@app.route("/broadcast", methods=["POST"])
+def broadcast_endpoint():
+    broadcast_to_all()
+    return {
+        "status": "success",
+        "message": "تم إرسال الرسالة لجميع المستخدمين",
+        "recipients": len(user_id_to_name)
+    }, 200
+
+# --- تشغيل البوت ---
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
-    print(f"Starting LINE AI Friend Bot on port {port}...")
+    print(f"Starting LINE LoveBot on port {port}...")
     refresh_user_names()
     print(f"تم تحميل {len(user_id_to_name)} مستخدم من قاعدة البيانات")
     app.run(host="0.0.0.0", port=port, debug=False)
