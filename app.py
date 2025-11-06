@@ -1,7 +1,6 @@
 import os
 from flask import Flask, request
-from linebot.v3 import LineBotApi
-from linebot.v3.webhook import WebhookHandler
+from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from linebot.exceptions import LineBotApiError, InvalidSignatureError
 from dotenv import load_dotenv
@@ -23,7 +22,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, GEMINI_API_KEY]):
     raise ValueError("Missing required environment variables")
 
-# LINE Bot API
+# LINE Bot API (v2)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
@@ -73,7 +72,6 @@ def update_last_interaction(user_id):
         c.execute("UPDATE users SET last_interaction=? WHERE user_id=?", (datetime.now(), user_id))
         conn.commit()
 
-# توليد رد AI مختصر وحنون
 def generate_ai_reply(nickname, user_text):
     prompt = f"""
 أنت حبيبة ودودة، تتكلم بعامية سعودية مختصرة وحنونة.  
@@ -88,7 +86,6 @@ def generate_ai_reply(nickname, user_text):
         print(f"Gemini API Error: {e}")
         return f"{nickname}، حبيبي، ما فهمت كويس، ممكن تعيدلي؟"
 
-# Webhook
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature")
@@ -110,13 +107,13 @@ def handle_message(event: MessageEvent):
     user_text = event.message.text.strip()
 
     if not user_text:
-        return  # تجاهل الرسائل الفارغة
+        return
 
     user = get_user(user_id)
 
     if user is None:
         # مستخدم جديد يختار اسمه
-        nickname = user_text[:50]  # الحد الأقصى 50 حرف
+        nickname = user_text[:50]
         create_user(user_id, nickname)
         reply_text = f"تشرفنا {nickname} حبيبي\nكيف كان يومك اليوم؟"
     else:
