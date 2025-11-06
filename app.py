@@ -1,13 +1,10 @@
 import os
 import sqlite3
-from contextlib import contextmanager
-from datetime import datetime
 from flask import Flask, request
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from linebot.exceptions import InvalidSignatureError
 from dotenv import load_dotenv
-import google.generativeai as genai
 
 # تحميل المتغيرات البيئية
 load_dotenv()
@@ -16,94 +13,32 @@ app = Flask(__name__)
 
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, GEMINI_API_KEY]):
+if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET]):
     raise ValueError("Missing required environment variables")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# إعداد Gemini
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.0-flash-exp")
+# إعداد قاعدة البيانات لتخزين المستخدمين
+conn = sqlite3.connect("users.db", check_same_thread=False)
+c = conn.cursor()
 
-generation_config = {
-    "temperature": 0.7,
-    "top_p": 0.95,
-    "top_k": 40,
-    "max_output_tokens": 1000,
-}
-
-DB_PATH = "users.db"
-
-@contextmanager
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
-
-# إنشاء جدول المستخدمين
-def init_db():
-    with get_db_connection() as conn:
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id TEXT PRIMARY KEY,
-                nickname TEXT,
-                last_interaction DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-init_db()
-
-# جلب المستخدم
-def get_user(user_id):
-    with get_db_connection() as conn:
-        c = conn.cursor()
-        c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-        return c.fetchone()
-
-# إنشاء مستخدم جديد
-def create_user(user_id, nickname):
-    with get_db_connection() as conn:
-        c = conn.cursor()
-        c.execute(
-            "INSERT INTO users (user_id, nickname) VALUES (?, ?)",
-            (user_id, nickname)
-        )
-
-# تحديث آخر تفاعل
-def update_last_interaction(user_id):
-    with get_db_connection() as conn:
-        c = conn.cursor()
-        c.execute(
-            "UPDATE users SET last_interaction=? WHERE user_id=?",
-            (datetime.now(), user_id)
-        )
-
-# توليد رد AI
-def generate_ai_reply(user_text, nickname="حبيبي"):
-    prompt = f"""
-أنت حبيبة ودودة، تتكلم بعامية سعودية، مختصرة وعاطفية، بدون أي إيموجي.
-المستخدم ({nickname}) قال: "{user_text}"
-رد مختصر جداً (سطر أو سطرين) حنون وعاطفي.
-"""
-    try:
-        response = model.generate_content(prompt, generation_config=generation_config)
-        return response.text.strip()
-    except:
-        return f"{nickname}، حصل خطأ حاول مرة ثانية"
+c.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id TEXT PRIMARY KEY,
+    nickname TEXT,
+    last_interaction DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+""")
+conn.commit()
 
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature")
     if not signature:
         return "Missing signature", 400
+
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
@@ -118,36 +53,34 @@ def callback():
 def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text.strip()
-    
-    if not user_text:
+
+    # التحقق إذا المستخدم موجود في قاعدة البيانات
+    c.execute("SELECT nickname FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+
+    if user_text.lower() in ["مساعدة", "help", "/help", "/start"]:
+        ai_reply = "لبيه، وش أحب أناديك؟"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
         return
 
-    # أمر التشغيل لاختبار البوت
-    if user_text.lower() in ["تشغيل", "/test", "/ping"]:
-        try:
-            _ = generate_ai_reply("هل AI يعمل؟")
-            reply = "تم تشغيل البوت بنجاح"
-        except:
-            reply = "حدث خطأ أثناء تشغيل البوت"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    # إذا المستخدم جديد ولم يحدد اسمه
+    if row is None:
+        # اعتبر الرسالة اسم المستخدم
+        nickname = user_text
+        c.execute("INSERT INTO users (user_id, nickname) VALUES (?,?)", (user_id, nickname))
+        conn.commit()
+        ai_reply = f"{nickname}, كيف كان يومك اليوم؟"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
         return
 
-    # جلب المستخدم
-    user = get_user(user_id)
-    if user is None:
-        # مستخدم جديد - نسأل عن اسمه
-        create_user(user_id, user_text[:50])
-        reply = f"تشرفنا {user_text}، حبيبي\nكيف كان يومك اليوم؟"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-        return
-
-    nickname = user['nickname']
-    # تحديث آخر تفاعل
-    update_last_interaction(user_id)
-    
-    # توليد رد AI
-    ai_reply = generate_ai_reply(user_text, nickname)
+    # إذا المستخدم موجود
+    nickname = row[0]
+    ai_reply = f"{nickname}, حبيبي، وش صار اليوم؟ تحب تحكي لي شوي؟"
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
+
+    # تحديث وقت آخر تفاعل
+    c.execute("UPDATE users SET last_interaction=CURRENT_TIMESTAMP WHERE user_id=?", (user_id,))
+    conn.commit()
 
 @app.route("/", methods=["GET"])
 def home():
@@ -155,7 +88,7 @@ def home():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}, 200
+    return {"status": "healthy"}, 200
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
