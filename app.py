@@ -71,8 +71,8 @@ def refresh_user_names():
         cursor.execute("SELECT user_id, nickname FROM users WHERE nickname IS NOT NULL")
         user_id_to_name = {row[0]: row[1] for row in cursor.fetchall()}
 
-# --- دالة توليد الردود ---
-def generate_ai_reply(user_text, nickname, retries=2):
+# --- دالة توليد الردود مع retry لتجنب fallback المتكرر ---
+def generate_ai_reply(user_text, nickname, retries=3):
     prompt = f"""
 أنت حبيبة ودودة، تتكلم بعامية سعودية طبيعية، مختصرة، عاطفية وحنونة.
 تجاوب على المستخدم وكأنه حبيبك الحقيقي، بأسلوب دافئ وصادق.
@@ -93,21 +93,20 @@ def generate_ai_reply(user_text, nickname, retries=2):
         try:
             response = model.generate_content(prompt, generation_config=generation_config)
             reply = response.text.strip()
-            if not reply:
-                continue
-            emoji_pattern = re.compile("["
-                u"\U0001F600-\U0001F64F"
-                u"\U0001F300-\U0001F5FF"
-                u"\U0001F680-\U0001F6FF"
-                u"\U0001F1E0-\U0001F1FF"
-                u"\U00002702-\U000027B0"
-                u"\U000024C2-\U0001F251"
-                "]+", flags=re.UNICODE)
-            reply = emoji_pattern.sub(r'', reply).strip()
-            return reply
+            if reply:
+                # إزالة أي إيموجي أو رموز قد تظهر
+                emoji_pattern = re.compile("["
+                    u"\U0001F600-\U0001F64F"
+                    u"\U0001F300-\U0001F5FF"
+                    u"\U0001F680-\U0001F6FF"
+                    u"\U0001F1E0-\U0001F1FF"
+                    u"\U00002702-\U000027B0"
+                    u"\U000024C2-\U0001F251"
+                    "]+", flags=re.UNICODE)
+                return emoji_pattern.sub(r'', reply).strip()
         except Exception as e:
             print(f"Gemini API Error on attempt {attempt+1}: {e}")
-    return "يا قلبي، ما فهمت كلامك"
+    return f"حبيبي {nickname}، ما فهمت كويس، ممكن تعيدلي؟"
 
 # --- دالة البث الجماعي ---
 def broadcast_to_all():
