@@ -59,7 +59,7 @@ def handle_message(event):
     row = c.fetchone()
 
     if user_text.lower() in ["مساعدة", "help", "/help", "/start"]:
-        ai_reply = "لبيه، وش أحب أناديك؟"
+        ai_reply = "لبيه، وش تحب أناديك؟"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
         return
 
