@@ -1,123 +1,124 @@
 import os
 import logging
-from flask import Flask, request, abort
+from datetime import datetime
+from flask import Flask, request
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError, LineBotApiError
-from linebot.models import TextSendMessage, MessageEvent, TextMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.exceptions import InvalidSignatureError
 from dotenv import load_dotenv
 import google.generativeai as genai
+import time
 
-# إعداد السجلات
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ===== Logging =====
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger("LoveBot")
 
-# تحميل المتغيرات البيئية
+# ===== تحميل المتغيرات =====
 load_dotenv()
 
-app = Flask(__name__)
-
-# التحقق من المتغيرات البيئية
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+DEBUG_MODE = os.getenv("DEBUG_MODE", "False").lower() == "true"
 
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, GEMINI_API_KEY]):
+    logger.error("Missing environment variables")
     raise ValueError("Missing required environment variables")
 
-# إعداد LINE Bot
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# إعداد Gemini AI
+# ===== إعداد Gemini =====
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.0-flash-exp")
-
 generation_config = {
     "temperature": 0.7,
     "top_p": 0.95,
     "top_k": 40,
-    "max_output_tokens": 2000,
+    "max_output_tokens": 1000,
 }
 
-# دالة توليد الردود بالذكاء الاصطناعي
-def generate_ai_reply(user_text):
-    """توليد رد من Gemini AI بناءً على رسالة المستخدم"""
-    try:
-        prompt = f"""
-أنت صديقة ودودة وحنونة، تتكلم بالعربية العامية السعودية، مختصرة جداً (سطرين أو ثلاثة)، عاطفية وواقعية.
-المستخدم قال: "{user_text}"
-
-قواعد مهمة:
-- الردود مختصرة وسطرين أو ثلاثة فقط
-- بدون أي إيموجي أو رموز
-- ودود وعاطفي وحبّي
-- افهم شعوره ورد بطريقة صادقة وواقعية
-- كل الردود من gemini-2.0-flash-exp مباشرة، لا تستخدم أي نصوص جاهزة أو بدائل
-
-رد فقط بالرسالة، بدون مقدمات.
+# ===== توليد رد AI مع إعادة المحاولة =====
+def generate_ai_reply(user_text, nickname="حبيبي", retries=3):
+    prompt = f"""
+أنت حبيبة ودودة، تتكلم بعامية سعودية، مختصرة وعاطفية، بدون أي إيموجي.
+المستخدم ({nickname}) قال: "{user_text}"
+رد مختصر جداً (سطر أو سطرين) حنون وعاطفي.
 """
-        response = model.generate_content(prompt, generation_config=generation_config)
-        return response.text.strip()
-    except Exception as e:
-        logger.error(f"Error generating AI reply: {e}")
-        return "عذراً، حصل خطأ. جرب مرة ثانية"
+    attempt = 0
+    while attempt < retries:
+        try:
+            response = model.generate_content(prompt, generation_config=generation_config)
+            text = response.text.strip()
+            if len(text) > 500:
+                text = text[:500] + "..."
+            return text
+        except Exception as e:
+            attempt += 1
+            logger.warning(f"Attempt {attempt} failed: {e}")
+            time.sleep(0.5)
+    logger.error("All attempts to generate AI reply failed")
+    return f"{nickname}، حصل خطأ حاول مرة ثانية"
 
-# معالج الرسائل النصية
-@handler.add(MessageEvent, message=TextMessage)
-def handle_text_message(event):
-    user_text = event.message.text
-    logger.info(f"Received message: {user_text}")
-    try:
-        ai_reply = generate_ai_reply(user_text)
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=ai_reply)
-        )
-        logger.info(f"Sent reply: {ai_reply}")
-    except LineBotApiError as e:
-        logger.error(f"LINE Bot API error: {e}")
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+# ===== Flask routes =====
+app = Flask(__name__)
 
-# Webhook endpoint
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature")
     if not signature:
-        logger.warning("Missing X-Line-Signature header")
-        abort(400)
+        logger.warning("Missing X-Line-Signature")
+        return "Missing signature", 400
     body = request.get_data(as_text=True)
-    logger.info(f"Request body: {body}")
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        logger.error("Invalid signature. Check your channel secret.")
-        abort(400)
+        logger.warning("Invalid signature")
+        return "Invalid signature", 400
     except Exception as e:
-        logger.error(f"Error handling webhook: {e}")
-        abort(500)
+        logger.error(f"Error in callback: {e}")
+        return "Internal error", 500
     return "OK", 200
 
-# الصفحة الرئيسية
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_text = event.message.text.strip()
+    user_id = event.source.user_id
+
+    if not user_text:
+        if DEBUG_MODE:
+            logger.info(f"Empty message from {user_id}")
+        return
+
+    logger.info(f"Received message from {user_id}: {user_text}")
+
+    # أمر التشغيل لاختبار البوت
+    if user_text.lower() in ["تشغيل", "/test", "/ping"]:
+        try:
+            _ = generate_ai_reply("هل AI يعمل؟")
+            reply = "تم تشغيل البوت بنجاح"
+        except:
+            reply = "حدث خطأ أثناء تشغيل البوت"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+
+    # الرد مباشرة بدون حفظ المستخدم
+    ai_reply = generate_ai_reply(user_text, nickname="حبيبي")
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
+    logger.info(f"Replied to {user_id}: {ai_reply}")
+
 @app.route("/", methods=["GET"])
 def home():
-    return """
-<html>
-<head><title>LINE AI LoveBot</title></head>
-<body style="font-family: Arial; text-align: center; padding: 50px;">
-<h1>🤖 LINE AI LoveBot</h1>
-<p>البوت يعمل بنجاح!</p>
-<p style="color: #06c755;">✓ Server is running</p>
-</body>
-</html>
-""", 200
+    return "LINE LoveBot is running!", 200
 
-# فحص صحة التطبيق
 @app.route("/health", methods=["GET"])
 def health():
-    return {"status": "healthy", "service": "LINE AI LoveBot"}, 200
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}, 200
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
-    logger.info(f"Starting server on port {port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    logger.info(f"Starting LINE LoveBot on port {port} (DEBUG={DEBUG_MODE})...")
+    app.run(host="0.0.0.0", port=port, debug=DEBUG_MODE)
