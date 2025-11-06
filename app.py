@@ -10,7 +10,7 @@ from datetime import datetime
 from contextlib import closing
 import re
 
-# تحميل المتغيرات البيئية
+# --- تحميل المتغيرات البيئية ---
 load_dotenv()
 
 app = Flask(__name__)
@@ -22,6 +22,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, GEMINI_API_KEY]):
     raise ValueError("Missing required environment variables")
 
+# --- إعداد LINE Bot و Gemini ---
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
@@ -35,10 +36,10 @@ generation_config = {
     "max_output_tokens": 1000,
 }
 
+# --- قاعدة البيانات ---
 DATABASE = "users.db"
 user_id_to_name = {}
 
-# --- قاعدة البيانات ---
 def init_db():
     with closing(sqlite3.connect(DATABASE)) as conn:
         with conn:
@@ -46,8 +47,7 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS users (
                     user_id TEXT PRIMARY KEY,
                     nickname TEXT,
-                    last_interaction DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    current_step INTEGER DEFAULT 1
+                    last_interaction DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
 init_db()
@@ -80,14 +80,12 @@ def generate_ai_reply(user_text, nickname, retries=2):
 
 قواعد مهمة جداً:
 - ممنوع استخدام أي إيموجي نهائياً
-- ممنوع استخدام أي رموز تعبيرية
 - اكتب نص عادي فقط
 - اسلوبك طبيعي جداً ومختصر وواقعي
 - ودود وداعم عاطفياً
 - استخدم الاسم "{nickname}" بطريقة حنونة
 - ما تطول بالرد، خليه قصير ومباشر (سطرين أو ثلاثة كحد أقصى)
 - إذا ذكر يومه أو مشاعره، كون داعم ومريح
-- استخدم كلمات حنونة وعاطفية بس بدون مبالغة
 
 رد فقط بالرسالة بدون أي مقدمات أو علامات أو رموز.
 """
@@ -96,9 +94,7 @@ def generate_ai_reply(user_text, nickname, retries=2):
             response = model.generate_content(prompt, generation_config=generation_config)
             reply = response.text.strip()
             if not reply:
-                print(f"Empty response from Gemini, attempt {attempt+1}")
                 continue
-
             emoji_pattern = re.compile("["
                 u"\U0001F600-\U0001F64F"
                 u"\U0001F300-\U0001F5FF"
@@ -127,13 +123,12 @@ def broadcast_to_all():
     for user_id, nickname in user_id_to_name.items():
         try:
             line_bot_api.push_message(user_id, TextSendMessage(text=message_text))
-            print(f"تم الإرسال إلى {nickname} ({user_id})")
             success_count += 1
         except Exception as e:
-            print(f"خطأ بالإرسال إلى {nickname} ({user_id}): {e}")
+            print(f"خطأ بالإرسال إلى {nickname}: {e}")
             fail_count += 1
 
-    print(f"\n=== نتيجة البث ===\nنجح: {success_count} | فشل: {fail_count}")
+    print(f"=== نتيجة البث ===\nنجح: {success_count} | فشل: {fail_count}")
 
 # --- مسار callback ---
 @app.route("/callback", methods=["POST"])
@@ -157,16 +152,17 @@ def handle_message(event):
     user_text = event.message.text.strip()
     db = get_db()
     cursor = db.cursor()
-    cursor.execute("SELECT nickname, current_step FROM users WHERE user_id=?", (user_id,))
+
+    cursor.execute("SELECT nickname FROM users WHERE user_id=?", (user_id,))
     row = cursor.fetchone()
 
-    # أمر مساعدة
+    # أمر المساعدة
     if user_text.lower() in ["مساعدة", "help", "/help", "/start"]:
-        if not row:
-            ai_reply = "مرحباً، أنا صديقتك الجديدة\nوش تحب أناديك؟"
-        else:
+        if row:
             nickname = row['nickname']
-            ai_reply = f"أهلاً {nickname}\n\nأنا هنا عشان أسمعك وأكون معاك\nاحكيلي عن يومك، مشاعرك، أي شي تبي تشاركه"
+            ai_reply = f"أهلاً {nickname}، احكيلي أي شيء تحب أسمعه"
+        else:
+            ai_reply = "مرحباً، وش أحب أناديك؟"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
         return
 
@@ -174,31 +170,21 @@ def handle_message(event):
     if not row:
         nickname = user_text
         cursor.execute(
-            "INSERT INTO users (user_id, nickname, current_step, last_interaction) VALUES (?,?,2,?)",
-            (user_id, nickname, datetime.now())
+            "INSERT INTO users (user_id, nickname) VALUES (?,?)",
+            (user_id, nickname)
         )
         db.commit()
-        user_id_to_name[user_id] = nickname
         ai_reply = f"{nickname}، حبيبي\nكيف كان يومك اليوم؟"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
         return
 
+    # مستخدم موجود
     nickname = row['nickname']
-    current_step = row['current_step']
-    user_id_to_name[user_id] = nickname
-
-    if current_step == 2:
-        ai_reply = generate_ai_reply(user_text, nickname)
-        cursor.execute(
-            "UPDATE users SET current_step=3, last_interaction=? WHERE user_id=?",
-            (datetime.now(), user_id)
-        )
-    else:
-        ai_reply = generate_ai_reply(user_text, nickname)
-        cursor.execute(
-            "UPDATE users SET last_interaction=? WHERE user_id=?",
-            (datetime.now(), user_id)
-        )
+    ai_reply = generate_ai_reply(user_text, nickname)
+    cursor.execute(
+        "UPDATE users SET last_interaction=CURRENT_TIMESTAMP WHERE user_id=?",
+        (user_id,)
+    )
     db.commit()
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
 
@@ -211,17 +197,13 @@ def home():
 def health():
     refresh_user_names()
     return {
-        "status": "healthy", 
+        "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "registered_users": len(user_id_to_name)
     }, 200
 
 @app.route("/broadcast", methods=["POST"])
 def broadcast_endpoint():
-    """
-    نقطة نهاية لإرسال الرسالة الجماعية:
-    "حبيبي وينك؟ وحشتني"
-    """
     broadcast_to_all()
     return {
         "status": "success",
@@ -232,7 +214,6 @@ def broadcast_endpoint():
 # --- تشغيل البوت ---
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
-    print(f"Starting LINE LoveBot on port {port}...")
     refresh_user_names()
     print(f"تم تحميل {len(user_id_to_name)} مستخدم من قاعدة البيانات")
     app.run(host="0.0.0.0", port=port, debug=False)
