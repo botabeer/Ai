@@ -1,5 +1,8 @@
 import os
 import sqlite3
+import threading
+import random
+from datetime import datetime, timedelta
 from flask import Flask, request
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, QuickReply, QuickReplyButton, MessageAction
@@ -29,7 +32,7 @@ generation_config = {
     "temperature": 0.7,
     "top_p": 0.95,
     "top_k": 40,
-    "max_output_tokens": 2000,
+    "max_output_tokens": 1000,
 }
 
 # إعداد قاعدة البيانات
@@ -40,10 +43,61 @@ c.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
     nickname TEXT,
-    first_interaction INTEGER DEFAULT 1
+    last_interaction DATETIME
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS user_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    message TEXT,
+    bot_reply TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 """)
 conn.commit()
+
+# مواقف يومية قصيرة
+daily_scenarios = [
+    "كان في موقف اليوم أثر فيك، تحب تحكين لي عنه؟",
+    "مر يوم طويل، وش شعورك الحين؟",
+    "حصل موقف غريب أو مضحك اليوم، تحب تشاركني؟",
+    "اليوم شعرت بطاقة منخفضة، وش سويت لتحسن مزاجك؟",
+    "قابلت أحد اليوم أو صار موقف مهم، وش صار؟"
+]
+
+# تذكير المستخدمين الذين لم يردوا
+def daily_reminder():
+    threading.Timer(3600, daily_reminder).start()  # كل ساعة للتذكير
+    now = datetime.now()
+    c.execute("SELECT user_id, last_interaction FROM users")
+    users = c.fetchall()
+    for user_id, last_interaction in users:
+        if last_interaction:
+            last_time = datetime.strptime(last_interaction, "%Y-%m-%d %H:%M:%S.%f")
+            if now - last_time > timedelta(hours=6):  # إذا لم يتفاعل 6 ساعات
+                try:
+                    line_bot_api.push_message(user_id, TextSendMessage(text="حبيبي وينك؟ اشتقت لك"))
+                except Exception as e:
+                    print(f"Error sending reminder: {e}")
+
+# بدء التذكير التلقائي
+daily_reminder()
+
+def generate_ai_reply(user_text, user_id):
+    prompt = f"""
+أنت صديقة ودودة وعاطفية سعودية، ترد على المستخدم بأسلوب مختصر ولطيف وكأنك تحبه.
+ركز على شعوره، قدم نصائح عملية وعاطفية، واقترح طريقة صغيرة لتعزيز ثقته بنفسه.
+أجب مباشرة دون مقدمات. المستخدم كتب:
+{user_text}
+"""
+    try:
+        response = model.generate_content(prompt, generation_config=generation_config)
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini API Error: {e}")
+        return "حبيبي، ما فهمت قصدك، ممكن توضح لي شوي؟"
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -66,48 +120,42 @@ def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text.strip()
 
-    # التحقق من وجود المستخدم في قاعدة البيانات
-    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    user = c.fetchone()
+    # إضافة المستخدم إذا جديد
+    c.execute("INSERT OR IGNORE INTO users (user_id, last_interaction) VALUES (?, ?)", (user_id, datetime.now()))
+    conn.commit()
 
-    # أول مرة يرسل المستخدم المساعدة أو /start
+    # تحديث آخر تفاعل
+    c.execute("UPDATE users SET last_interaction=? WHERE user_id=?", (datetime.now(), user_id))
+    conn.commit()
+
+    # أوامر المساعدة / البداية
     if user_text.lower() in ["مساعدة", "help", "/help", "/start"]:
-        if not user:
-            ai_reply = "لبيه! أنا صديقتك الجديدةأختار لي اسم تحبه؟!"
-            c.execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
-            conn.commit()
-        else:
-            ai_reply = "مرحبًا من جديد! تحب نبدأ بحوار اليوم؟"
+        ai_reply = "لبيه، أنا صديقتك الجديدة. اختار لي اسم تحبه."
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
         return
 
-    # إذا المستخدم يرسل اسمه لأول مرة
-    if user and user[2] == 1:  # first_interaction = 1
-        nickname = user_text
-        c.execute("UPDATE users SET nickname=?, first_interaction=0 WHERE user_id=?", (nickname, user_id))
+    # الرد على اسم المستخدم إذا لم يكن معرف
+    c.execute("SELECT nickname FROM users WHERE user_id=?", (user_id,))
+    nickname = c.fetchone()[0]
+    if not nickname:
+        c.execute("UPDATE users SET nickname=? WHERE user_id=?", (user_text, user_id))
         conn.commit()
-        ai_reply = f"تمام! الحين صار لك اسم، {nickname}. كيف كان يومك اليوم؟ تحب تحكين لي شوي عن يومك؟"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
+        reply = f"تمام حبيبي، أحبك أسميك {user_text}. كيف كان يومك اليوم؟"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
-    # الردود العامة: تفاعل ذكاء اصطناعي ودّي
-    prompt = f"""
-أنت صديقة ودية ومهتمة، تحاور المستخدم بأسلوب مختصر وواقعي، تركز على تعزيز ثقته بنفسه وتقوية شخصيته.
-المستخدم كتب: {user_text}
-أجب بأسلوب ودّي ولبق وكأنك صديقة مقربة، وادمج نصيحة قصيرة لتحسين النفس.
-"""
-    try:
-        response = model.generate_content(prompt, generation_config=generation_config)
-        ai_reply = response.text.strip()
-    except Exception as e:
-        print(f"Gemini API Error: {e}")
-        ai_reply = "عذرًا، حصل خطأ أثناء محاولة الرد، جرب مرة ثانية."
-
+    # إرسال رد AI عاطفي مختصر
+    ai_reply = generate_ai_reply(user_text, user_id)
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
+
+    # تسجيل المحادثة
+    c.execute("INSERT INTO user_logs (user_id, message, bot_reply) VALUES (?, ?, ?)",
+              (user_id, user_text, ai_reply))
+    conn.commit()
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE FriendlyBot is running!", 200
+    return "LINE LovingBot is running!", 200
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -115,5 +163,5 @@ def health():
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
-    print(f"Starting LINE Bot on port {port}...")
+    print(f"Starting LINE LovingBot on port {port}...")
     app.run(host="0.0.0.0", port=port, debug=False)
