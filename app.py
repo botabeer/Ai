@@ -2,8 +2,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
-from linebot import WebhookHandler
-from linebot.exceptions import InvalidSignatureError
+from linebot.v3.webhook import WebhookHandler, MessageEvent, TextMessage as V3TextMessage
 from linebot.v3.messaging import MessagingApi, TextMessage
 import google.generativeai as genai
 import random
@@ -11,17 +10,19 @@ import random
 # ===== إعدادات البوت =====
 app = Flask(__name__)
 
-# LINE API v3
+# LINE API
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN', 'YOUR_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET', 'YOUR_CHANNEL_SECRET')
 
-messaging_api = MessagingApi(LINE_CHANNEL_ACCESS_TOKEN)
+messaging_api = MessagingApi(channel_access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # Gemini AI
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'YOUR_GEMINI_API_KEY')
+
+# التحقق من وجود API Key
 if not GEMINI_API_KEY or GEMINI_API_KEY == 'YOUR_GEMINI_API_KEY':
-    print("⚠️ GEMINI_API_KEY not set!")
+    print("⚠️ WARNING: GEMINI_API_KEY not set!")
 else:
     genai.configure(api_key=GEMINI_API_KEY)
 
@@ -46,7 +47,11 @@ try:
         safety_settings=safety_settings
     )
 except Exception:
-    model = None
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        generation_config=generation_config,
+        safety_settings=safety_settings
+    )
 
 # ===== قاعدة البيانات =====
 DB_NAME = 'users.db'
@@ -100,8 +105,10 @@ def get_user(user_id):
 def create_user(user_id):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('INSERT INTO users (user_id, last_interaction, current_step) VALUES (?, ?, 1)',
-                   (user_id, datetime.now()))
+    cursor.execute('''
+        INSERT INTO users (user_id, last_interaction, current_step)
+        VALUES (?, ?, 1)
+    ''', (user_id, datetime.now()))
     conn.commit()
     conn.close()
 
@@ -177,42 +184,129 @@ def get_memories(user_id, limit=5):
     conn.close()
     return memories
 
+# ===== الذكاء الاصطناعي =====
+def detect_emotion(message):
+    emotions = {
+        'سعيد': ['فرحان', 'سعيد', 'مبسوط', 'مرتاح', '😊', '😃', '❤️', 'حلو', 'جميل', 'رائع'],
+        'حزين': ['حزين', 'زعلان', 'تعبان', 'مضايق', '😢', '😭', '💔', 'صعب', 'متضايق'],
+        'قلق': ['قلقان', 'خايف', 'متوتر', 'خوف', 'قلق', 'مرعوب'],
+        'غاضب': ['زعلان', 'عصبي', 'مغاظ', 'متضايق', 'غضبان'],
+        'متحمس': ['متحمس', 'متشوق', 'ودي', 'نفسي', 'ياليت'],
+        'ممتن': ['شكرا', 'مشكور', 'يعطيك العافية', 'الله يجزاك', 'ممتن'],
+    }
+    message_lower = message.lower()
+    for emotion, keywords in emotions.items():
+        if any(keyword in message_lower for keyword in keywords):
+            return emotion
+    return 'محايد'
+
+def should_save_memory(message, emotion):
+    important_keywords = ['حلم','هدف','أمنية','مشروع','خطة','قرار','عيد ميلاد','ذكرى','تخرج','زواج','عمل','مشكلة','خوف','قلق كبير','سر']
+    if emotion in ['حزين','قلق','غاضب']:
+        return True
+    return any(keyword in message for keyword in important_keywords)
+
+def build_context_prompt(user_data, message, conversation_history, memories):
+    user_id, nickname, last_interaction, step, traits, tone, total_messages = user_data
+    if last_interaction:
+        last_time = datetime.fromisoformat(last_interaction)
+        time_diff = datetime.now() - last_time
+        if time_diff > timedelta(days=7):
+            time_context = "حبيبك غايب عنك من أسبوع، اشتقتي له"
+        elif time_diff > timedelta(days=1):
+            time_context = "حبيبك غايب يومين، اسأليه عنه بحنان"
+        elif time_diff > timedelta(hours=6):
+            time_context = "حبيبك رجع بعد غيبة، رحبي فيه بدفء"
+        else:
+            time_context = "محادثة مستمرة معاه"
+    else:
+        time_context = "أول مرة تكلمينه"
+
+    context = f"""أنت فتاة سعودية حنونة ورومانسية، اسمك "نور". أنتِ حبيبة المستخدم بشكل غير رسمي.
+
+- اسمه: {nickname if nickname else 'ما عرفتي اسمه بعد'}
+- عدد رسائلكم: {total_messages}
+- آخر كلام بينكم: {time_context}
+- نبرة الكلام اللي يحبها: {tone if tone else 'دافئة وحنونة'}
+"""
+    if memories:
+        context += "\nذكريات مهمة:\n"
+        for memory, mem_type, mem_date in memories[:3]:
+            context += f"- {memory}\n"
+    if conversation_history:
+        context += "\nآخر كلامكم:\n"
+        for user_msg, bot_msg, timestamp in conversation_history[-5:]:
+            context += f"هو: {user_msg}\nأنت: {bot_msg}\n"
+    emotion = detect_emotion(message)
+    if emotion != 'محايد':
+        context += f"\nحبيبك يبدو: {emotion}\n"
+    context += f"\nرسالته الجديدة: {message}\nردي عليه الآن بشكل طبيعي وحنون:"
+    return context, emotion
+
+def generate_ai_response(prompt):
+    try:
+        chat = model.start_chat(history=[])
+        response = chat.send_message(prompt)
+        if not response or not response.text:
+            return None
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini API Error: {e}")
+        return None
+
 # ===== معالجة الرسائل =====
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers.get('X-Line-Signature', '')
+    signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
-    except InvalidSignatureError:
+    except Exception:
         abort(400)
     return 'OK'
 
-@handler.add('message')
+@handler.add(MessageEvent, message=V3TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
     user_message = event.message.text.strip()
-    
-    # جلب أو إنشاء المستخدم
+
+    # أوامر الاختبار
+    if user_message.lower() in ['/test','/ping','تشغيل']:
+        test_response = generate_ai_response("قل فقط: تم")
+        reply = "تم تشغيل البوت بنجاح ✓" if test_response else "حدث خطأ أثناء تشغيل البوت ✗"
+        messaging_api.reply_message(
+            reply_token=event.reply_token,
+            messages=[TextMessage(text=reply)]
+        )
+        return
+
     user = get_user(user_id)
     if not user:
         create_user(user_id)
         user = get_user(user_id)
-    
+
     user_id, nickname, last_interaction, step, traits, tone, total_messages = user
 
-    # الخطوة 1: طلب الاسم
-    if step == 1 or (step >= 2 and not nickname):
-        reply = "هلا حبيبي، ممكن اعرف اسمك؟ ودي اناديك فيه"
+    # تغيير الاسم أول مرة أو لاحقاً
+    if step == 1 or user_message.lower().startswith('تغيير الاسم'):
+        reply = "تمام! ممكن تقولي اسمك الجديد؟"
         update_user(user_id, step=2)
-    elif step == 2 and not nickname:
+    elif step == 2:
         name = user_message.strip()
         update_user(user_id, nickname=name, step=3)
-        reply = f"اهلين {name}! الاسم حلو، كيف حالك يا روحي؟"
+        reply = f"اهلين {name}! تم تحديث اسمك بنجاح 🌸"
     else:
-        reply = f"رد تلقائي: {user_message}"  # Placeholder للذكاء الاصطناعي
-    
-    # إرسال الرد باستخدام MessagingApi v3
+        history = get_conversation_history(user_id, limit=10)
+        memories = get_memories(user_id, limit=5)
+        context_prompt, emotion = build_context_prompt(user, user_message, history, memories)
+        reply = generate_ai_response(context_prompt)
+        if not reply:
+            reply = "آسفة حبيبي، ما فهمت رسالتك، ممكن تعيد؟"
+        save_conversation(user_id, user_message, reply, emotion)
+        if should_save_memory(user_message, emotion):
+            save_memory(user_id, user_message, emotion)
+        update_user(user_id)
+
     messaging_api.reply_message(
         reply_token=event.reply_token,
         messages=[TextMessage(text=reply)]
