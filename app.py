@@ -49,7 +49,6 @@ generation_config = {
 DB_PATH = "lovebot.db"
 
 def init_db():
-    """تهيئة قاعدة البيانات"""
     with get_db_connection() as conn:
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS users (
@@ -68,7 +67,6 @@ def init_db():
             timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(user_id)
         )''')
-        # إضافة فهرس لتحسين الأداء
         c.execute('''CREATE INDEX IF NOT EXISTS idx_user_id 
                      ON conversations(user_id)''')
         c.execute('''CREATE INDEX IF NOT EXISTS idx_timestamp 
@@ -78,7 +76,6 @@ def init_db():
 
 @contextmanager
 def get_db_connection():
-    """إدارة اتصال قاعدة البيانات بشكل آمن"""
     conn = sqlite3.connect(DB_PATH, timeout=10.0)
     conn.row_factory = sqlite3.Row
     try:
@@ -87,7 +84,6 @@ def get_db_connection():
         conn.close()
 
 def get_user(user_id):
-    """الحصول على بيانات المستخدم"""
     try:
         with get_db_connection() as conn:
             c = conn.cursor()
@@ -98,7 +94,6 @@ def get_user(user_id):
         return None
 
 def create_user(user_id):
-    """إنشاء مستخدم جديد"""
     try:
         now = datetime.now().isoformat()
         with get_db_connection() as conn:
@@ -113,7 +108,6 @@ def create_user(user_id):
         logger.error(f"Database error in create_user: {e}")
 
 def update_user(user_id, bot_name=None, user_nickname=None, step=None):
-    """تحديث بيانات المستخدم"""
     try:
         now = datetime.now().isoformat()
         with get_db_connection() as conn:
@@ -140,7 +134,6 @@ def update_user(user_id, bot_name=None, user_nickname=None, step=None):
         logger.error(f"Database error in update_user: {e}")
 
 def save_conversation(user_id, user_msg, bot_reply):
-    """حفظ المحادثة"""
     try:
         now = datetime.now().isoformat()
         with get_db_connection() as conn:
@@ -154,7 +147,6 @@ def save_conversation(user_id, user_msg, bot_reply):
         logger.error(f"Database error in save_conversation: {e}")
 
 def get_conversation_history(user_id, limit=5):
-    """الحصول على سجل المحادثات الأخيرة"""
     try:
         with get_db_connection() as conn:
             c = conn.cursor()
@@ -168,17 +160,13 @@ def get_conversation_history(user_id, limit=5):
         return []
 
 # ألقاب المستخدم
-USER_TITLES = ["حبيبي", "قلبي", "يا روحي", "يا بعد عمري", "دنيتي", "عمري", "يا غالي"]
+USER_TITLES = ["حبيبي", "قلبي", "يا روحي", "يا بعد عمري", "دنيتي", "عمري", "جنتي"]
 
 def get_random_title():
-    """اختيار لقب عشوائي"""
     return random.choice(USER_TITLES)
 
 def generate_ai_response(user_message, bot_name="وتين", user_id=None):
-    """توليد ردود ذكية بأسلوب ودود وحنون"""
     title = get_random_title()
-    
-    # إضافة سياق من المحادثات السابقة
     context = ""
     if user_id:
         history = get_conversation_history(user_id, limit=3)
@@ -188,53 +176,47 @@ def generate_ai_response(user_message, bot_name="وتين", user_id=None):
                 context += f"المستخدم: {msg['user_msg']}\n{bot_name}: {msg['bot_reply']}\n"
     
     personality_prompt = f"""أنت {bot_name}، بنت خليجية سعودية ودودة وحنونة، تتحدث بأسلوب مباشر وبسيط ومختصر.
-- لا تستخدم إيموجي نهائياً
-- خاطب المستخدم دائماً بألقاب مثل "حبيبي"، "قلبي"، "يا روحي"
+- لا تستخدم إيموجي
+- خاطب المستخدم دائماً بألقاب مثل "حبيبي", "قلبي", "يا روحي", "جنتي"
 - ركز على الدعم النفسي وتطوير الشخصية وتعزيز الثقة بالنفس
-- قدم نصائح عملية للعلاقات العاطفية بطريقة غير مباشرة
-- كن مختصراً: 1-3 جمل فقط
-- تجنب التكرار واستخدم أسلوباً متنوعاً{context}
+- قدم نصائح للعلاقات العاطفية بطريقة غير مباشرة
+- استخدم جمل قصيرة، 1-3 جمل
+- تجنب التكرار واستخدم أسلوب متنوع
+{context}
 
 ## رسالة المستخدم الحالية:
 {user_message}
 
-## ردك المختصر (1-3 جمل، بدون إيموجي):"""
+## ردك المختصر:"""
 
     try:
         response = model.generate_content(
-            prompt,
+            personality_prompt,
             generation_config=generation_config
         )
         ai_reply = response.text.strip()
-        
         if not ai_reply:
             return f"{title}, ما فهمتك زين. وضح لي أكثر"
-        
-        # تنظيف الرد من الإيموجي المحتملة
-        ai_reply = remove_emojis(ai_reply)
-        
-        # التأكد من عدم تجاوز حد LINE
         return ai_reply[:4900]
-        
     except Exception as e:
         logger.error(f"Gemini API error: {e}")
         return f"{title}, معذرة صار عندي خطأ بسيط. جرب مرة ثانية"
 
+# إزالة أي إيموجي
 def remove_emojis(text):
-    """إزالة الإيموجي من النص"""
     import re
     emoji_pattern = re.compile(
         "["
-        "\U0001F600-\U0001F64F"  # emoticons
-        "\U0001F300-\U0001F5FF"  # symbols & pictographs
-        "\U0001F680-\U0001F6FF"  # transport & map symbols
-        "\U0001F700-\U0001F77F"  # alchemical symbols
-        "\U0001F780-\U0001F7FF"  # Geometric Shapes Extended
-        "\U0001F800-\U0001F8FF"  # Supplemental Arrows-C
-        "\U0001F900-\U0001F9FF"  # Supplemental Symbols and Pictographs
-        "\U0001FA00-\U0001FA6F"  # Chess Symbols
-        "\U0001FA70-\U0001FAFF"  # Symbols and Pictographs Extended-A
-        "\U00002702-\U000027B0"  # Dingbats
+        "\U0001F600-\U0001F64F"
+        "\U0001F300-\U0001F5FF"
+        "\U0001F680-\U0001F6FF"
+        "\U0001F700-\U0001F77F"
+        "\U0001F780-\U0001F7FF"
+        "\U0001F800-\U0001F8FF"
+        "\U0001F900-\U0001F9FF"
+        "\U0001FA00-\U0001FA6F"
+        "\U0001FA70-\U0001FAFF"
+        "\U00002702-\U000027B0"
         "\U000024C2-\U0001F251" 
         "]+", flags=re.UNICODE
     )
@@ -243,50 +225,40 @@ def remove_emojis(text):
 # معالجة الرسائل
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    """معالجة رسائل LINE"""
     user_id = event.source.user_id
     user_message = event.message.text.strip()
-    
-    # التحقق من طول الرسالة
-    if len(user_message) > 5000:
-        reply = f"{get_random_title()}, رسالتك طويلة جداً. اختصرها شوي"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-        return
-    
-    # الحصول على بيانات المستخدم
+
     user = get_user(user_id)
     if not user:
         create_user(user_id)
         user = get_user(user_id)
-    
-    if not user:
-        logger.error(f"Failed to get/create user: {user_id}")
-        return
-    
+
     bot_name = user['bot_name'] or 'وتين'
     step = user['step']
-    
-    # معالجة أوامر المساعدة
+
+    # أمر المساعدة
     if user_message.lower() in ["مساعدة", "help", "/help", "/start", "بداية"]:
-        reply = f"{get_random_title()}, أهلاً حبيبي! \nأنا بوت \nوش تحب تسميني؟ اختار لي اسم يعجبك"
-        update_user(user_id, step=2)
-    
-    # خطوة اختيار الاسم
+        if step == 1:
+            reply = f"{get_random_title()}, أهلاً!\nوش تحب تسميني؟ اختار لي اسم يعجبك"
+            update_user(user_id, step=2)
+        else:
+            reply = get_random_title()  # لقب فقط
+
+    # خطوة اختيار اسم البوت
     elif step == 2:
-        chosen_name = user_message.strip()[:50]  # تحديد طول الاسم
+        chosen_name = user_message.strip()[:50]
         if len(chosen_name) < 2:
             reply = f"{get_random_title()}, اختار اسم أطول شوي"
         else:
             update_user(user_id, bot_name=chosen_name, step=3)
-            reply = f"{get_random_title()}, تمام! من اليوم أنا {chosen_name} 🤍\nكيف حالك اليوم؟"
-    
+            reply = f"{get_random_title()}, تمام! من اليوم أنا {chosen_name}\nكيف حالك اليوم؟"
+
     # المحادثة العادية
     else:
         reply = generate_ai_response(user_message, bot_name, user_id)
         save_conversation(user_id, user_message, reply)
         update_user(user_id)
-    
-    # إرسال الرد
+
     try:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
     except LineBotApiError as e:
@@ -294,33 +266,26 @@ def handle_message(event):
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    """معالجة Webhook من LINE"""
     signature = request.headers.get("X-Line-Signature")
     if not signature:
-        logger.warning("Missing X-Line-Signature header")
         abort(400)
-    
     body = request.get_data(as_text=True)
-    
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        logger.error("Invalid signature")
         abort(400)
     except Exception as e:
         logger.error(f"Error in callback: {e}", exc_info=True)
         abort(500)
-    
     return "OK", 200
 
 @app.route("/", methods=["GET"])
 def home():
-    """الصفحة الرئيسية"""
     return """
     <html>
         <head><title>LoveBot</title></head>
         <body style='font-family: Arial; text-align: center; padding: 50px;'>
-            <h1>💙 LoveBot is Running!</h1>
+            <h1> LoveBot is Running!</h1>
             <p>Your emotional support companion is ready.</p>
         </body>
     </html>
@@ -328,7 +293,6 @@ def home():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """نقطة فحص صحة الخدمة"""
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}, 200
 
 @app.errorhandler(404)
@@ -341,14 +305,9 @@ def internal_error(error):
     return {"error": "Internal server error"}, 500
 
 if __name__ == "__main__":
-    # تهيئة قاعدة البيانات
     init_db()
-    
-    # تشغيل الخادم
     port = int(os.getenv("PORT", 10000))
     debug = os.getenv("DEBUG", "False").lower() == "true"
-    
     logger.info(f"🚀 Starting LoveBot on port {port}...")
     logger.info(f"📝 Debug mode: {debug}")
-    
     app.run(host="0.0.0.0", port=port, debug=debug)
