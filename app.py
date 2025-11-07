@@ -1,128 +1,132 @@
 import os
 import sqlite3
-from datetime import datetime, timedelta
-from flask import Flask, request, abort
-from linebot.v3.webhook import WebhookHandler, MessageEvent
-from linebot.v3.messaging import MessagingApi, TextMessage as V3TextMessage
+from flask import Flask, request
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.exceptions import InvalidSignatureError
+from dotenv import load_dotenv
 import google.generativeai as genai
-import random
 
-# ===== إعدادات البوت =====
+# تحميل المتغيرات البيئية
+load_dotenv()
+
 app = Flask(__name__)
 
-LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET', 'YOUR_CHANNEL_SECRET')
-line_bot_api = MessagingApi()
+# إعداد المفاتيح
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, GEMINI_API_KEY]):
+    raise ValueError("متغيرات البيئة ناقصة")
+
+# إعداد LINE و Gemini
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel("gemini-2.0-flash-exp")
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'YOUR_GEMINI_API_KEY')
-if GEMINI_API_KEY and GEMINI_API_KEY != 'YOUR_GEMINI_API_KEY':
-    genai.configure(api_key=GEMINI_API_KEY)
-else:
-    print("⚠️ GEMINI_API_KEY not set!")
+# إعداد قاعدة البيانات
+conn = sqlite3.connect("users.db", check_same_thread=False)
+c = conn.cursor()
+c.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id TEXT PRIMARY KEY,
+    nickname TEXT,
+    last_interaction DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+""")
+conn.commit()
 
-generation_config = {"temperature":0.85,"top_p":0.95,"top_k":50,"max_output_tokens":1200}
-safety_settings = [{"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_NONE"},
-                   {"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"BLOCK_NONE"},
-                   {"category":"HARM_CATEGORY_SEXUALLY_EXPLICIT","threshold":"BLOCK_NONE"},
-                   {"category":"HARM_CATEGORY_DANGEROUS_CONTENT","threshold":"BLOCK_NONE"}]
-
-try:
-    model = genai.GenerativeModel(model_name="gemini-2.0-flash-exp", generation_config=generation_config, safety_settings=safety_settings)
-except:
-    model = None
-
-# ===== قاعدة البيانات =====
-DB_NAME = 'users.db'
-
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id TEXT PRIMARY KEY,
-        nickname TEXT,
-        last_interaction TIMESTAMP,
-        current_step INTEGER DEFAULT 1,
-        total_messages INTEGER DEFAULT 0
-    )''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS conversations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        user_message TEXT,
-        bot_response TEXT,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
-    conn.commit(); conn.close()
-
-def get_user(user_id):
-    conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE user_id=?', (user_id,))
-    user = cursor.fetchone(); conn.close(); return user
-
-def create_user(user_id):
-    conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
-    cursor.execute('INSERT INTO users (user_id,last_interaction) VALUES (?,?)', (user_id, datetime.now()))
-    conn.commit(); conn.close()
-
-def update_user(user_id, nickname=None, step=None):
-    conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
-    updates = ['last_interaction=?']; params=[datetime.now()]
-    if nickname: updates.append('nickname=?'); params.append(nickname)
-    if step: updates.append('current_step=?'); params.append(step)
-    updates.append('total_messages = total_messages + 1')
-    params.append(user_id)
-    cursor.execute(f"UPDATE users SET {', '.join(updates)} WHERE user_id=?", params)
-    conn.commit(); conn.close()
-
-def save_conversation(user_id, user_message, bot_response):
-    conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
-    cursor.execute('INSERT INTO conversations (user_id,user_message,bot_response) VALUES (?,?,?)',
-                   (user_id,user_message,bot_response))
-    conn.commit(); conn.close()
-
-# ===== Gemini AI =====
-def generate_ai_response(prompt):
-    if not model: return "آسفة، حصل خطأ في AI"
+# إعداد توليد الردود
+def generate_ai_reply(user_text, nickname):
+    prompt = f"""
+اسمك آيلا، بنت سعودية ناعمة وحنونة، ترد بأسلوب مختصر (سطرين أو ثلاثة كحد أقصى)،
+بدون إيموجي، بلهجة واقعية دافئة.
+تتكلمين مع {nickname} وكأنه شخص غالي تحبينه.
+تجنبي الرسمية والكلمات المكررة.
+المستخدم قال: "{user_text}"
+"""
     try:
-        chat = model.start_chat(history=[])
-        response = chat.send_message(prompt)
-        return response.text.strip() if response and response.text else "آسفة، حصل خطأ"
-    except:
-        return "آسفة، حصل خطأ في AI"
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini Error: {e}")
+        return "دقايق حبيبي، انشغلت شوي وبرجع لك."
 
-# ===== معالجة الرسائل =====
-@app.route("/callback", methods=['POST'])
+# استقبال الرسائل من LINE
+@app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers.get('X-Line-Signature', '')
+    signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
-    try: handler.handle(body, signature)
-    except: abort(400)
-    return 'OK'
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        return "Invalid signature", 400
+    except Exception as e:
+        print(f"Error: {e}")
+        return "Error", 500
+    return "OK", 200
 
-@handler.add(MessageEvent)
+# معالجة الرسائل
+@handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
-    msg = event.message.text.strip()
-    user = get_user(user_id)
-    if not user: create_user(user_id); user=get_user(user_id)
-    _, nickname, _, step, _ = user
+    user_text = event.message.text.strip()
 
-    # خطوة طلب الاسم أو تغيير الاسم
-    if step==1 or (step>1 and msg.lower().startswith('تغيير الاسم')):
-        reply = "هلا حبيبي، ممكن تقول لي اسمك الجديد؟"
-        update_user(user_id, step=2)
-    elif step==2:
-        name = msg.strip()
-        update_user(user_id, nickname=name, step=3)
-        reply = f"تم تسجيل اسمك {name}! كيف حالك يا قلبي؟"
-    else:
-        prompt = f"أنت نور، حبيبة {nickname}. رد على هذا: {msg}"
-        reply = generate_ai_response(prompt)
-        save_conversation(user_id, msg, reply)
-        update_user(user_id)
+    # أوامر النظام
+    if user_text.lower() in ["/test", "/ping", "تشغيل", "تجربة"]:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="تم تشغيل آيلا بنجاح حبي.")
+        )
+        return
 
-    line_bot_api.reply_message(event.reply_token, V3TextMessage(text=reply))
+    # التحقق من المستخدم
+    c.execute("SELECT nickname FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
 
-# ===== تشغيل البوت =====
+    # مستخدم جديد
+    if not row:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="لبيه، أنا آيلا. وش أحب أناديك؟")
+        )
+        c.execute("INSERT OR REPLACE INTO users (user_id, nickname) VALUES (?, ?)", (user_id, None))
+        conn.commit()
+        return
+
+    nickname = row[0]
+
+    # أول مرة يسجل الاسم
+    if nickname is None:
+        c.execute("UPDATE users SET nickname=? WHERE user_id=?", (user_text, user_id))
+        conn.commit()
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=f"{user_text}؟ حلو الاسم، نادى قلبي عليك من أول.")
+        )
+        return
+
+    # تغيير الاسم
+    if user_text.lower() in ["تغيير الاسم", "غير اسمي", "ابي اغير اسمي"]:
+        c.execute("UPDATE users SET nickname=? WHERE user_id=?", (None, user_id))
+        conn.commit()
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="تمام حبي، وش تبيني أناديك الحين؟")
+        )
+        return
+
+    # رد من Gemini
+    ai_reply = generate_ai_reply(user_text, nickname)
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_reply))
+
+@app.route("/", methods=["GET"])
+def home():
+    return "LoveBot Ayla is running", 200
+
 if __name__ == "__main__":
-    init_db()
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT',5000)), debug=False)
+    port = int(os.getenv("PORT", 10000))
+    print(f"🚀 Running LoveBot Ayla on port {port}")
+    app.run(host="0.0.0.0", port=port)
