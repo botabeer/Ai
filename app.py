@@ -39,9 +39,10 @@ generation_config = {
     "max_output_tokens": 1500,
 }
 
-# قاعدة البيانات مع thread-safety
+# قاعدة البيانات
 DB_PATH = "lovebot.db"
 db_lock = threading.Lock()
+NICKNAMES = ["حبيبي", "قلبي", "يا روحي", "دنيتي", "يا بعد عمري", "عمري"]
 
 @contextmanager
 def get_db():
@@ -85,10 +86,7 @@ def create_user(user_id):
     with db_lock:
         with get_db() as conn:
             c = conn.cursor()
-            c.execute(
-                "INSERT OR IGNORE INTO users (user_id, last_interaction, step, auto_message_count) VALUES (?, ?, 1, 0)",
-                (user_id, now)
-            )
+            c.execute("INSERT OR IGNORE INTO users (user_id, last_interaction, step, auto_message_count) VALUES (?, ?, 1, 0)", (user_id, now))
             conn.commit()
 
 def update_user(user_id, bot_name=None, user_nickname=None, step=None):
@@ -123,36 +121,37 @@ def save_conversation(user_id, user_msg, bot_reply):
             )
             conn.commit()
 
-# ألقاب دلع
-NICKNAMES = ["حبيبي", "قلبي", "عمري", "دنيتي"]
-last_nickname = {}
+def get_idle_users(max_idle_hours=2):
+    cutoff_time = (datetime.now() - timedelta(hours=max_idle_hours)).isoformat()
+    with db_lock:
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT user_id, bot_name, user_nickname, auto_message_count FROM users WHERE last_interaction < ? AND step >= 4 AND auto_message_count < 3",
+                (cutoff_time,)
+            )
+            return c.fetchall()
 
-def get_random_nickname(user_id):
-    global last_nickname
-    available = [n for n in NICKNAMES if last_nickname.get(user_id) != n]
-    if not available:
-        available = NICKNAMES
-    nickname = random.choice(available)
-    last_nickname[user_id] = nickname
-    return nickname
+def increment_auto_message_count(user_id):
+    with db_lock:
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("UPDATE users SET auto_message_count = auto_message_count + 1 WHERE user_id=?", (user_id,))
+            conn.commit()
 
-# وصف شخصية البوت
-def get_bot_personality_prompt(bot_name="وتين", user_nickname=None):
-    nickname_context = f"تناديه {user_nickname}" if user_nickname else "تناديه بألقاب دلع"
-    return f"""أنت {bot_name}، بنت سعودية هادية وحنونة.
-- تتكلمين بعفوية وبساطة، مثل صديقة قريبة من القلب
-- {nickname_context} بشكل طبيعي ودافئ
-- ما تحبين الكلام الطويل، تروحين للموضوع مباشرة
-- تستخدمين أسلوب السؤال البسيط بدل النصيحة المباشرة
-- جملك قصيرة ومباشرة، عادة 1-2 جملة فقط
-- بدون إيموجي"""
+def reset_auto_message_count(user_id):
+    with db_lock:
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("UPDATE users SET auto_message_count = 0 WHERE user_id=?", (user_id,))
+            conn.commit()
 
 # الرسائل التلقائية
-def get_auto_messages(bot_name=None, user_id=None):
-    nickname = get_random_nickname(user_id)
+def get_auto_messages(bot_name=None, user_nickname=None):
+    nickname = random.choice(NICKNAMES)
     name_suffix = f"\n- {bot_name}" if bot_name else ""
     return [
-        f"وينك {nickname}، اشتقت لك{name_suffix}",
+        f"{nickname}، وينك؟ اشتقت لك{name_suffix}",
         f"{nickname}، أفكر فيك الحين{name_suffix}",
         f"{nickname}، كيف يومك؟ اتمنى تكون بخير{name_suffix}"
     ]
@@ -164,51 +163,47 @@ def send_auto_messages():
     print("Auto-message thread started")
     while True:
         try:
-            with db_lock:
-                with get_db() as conn:
-                    c = conn.cursor()
-                    cutoff_time = (datetime.now() - timedelta(hours=MAX_IDLE_HOURS)).isoformat()
-                    c.execute(
-                        "SELECT user_id, bot_name, user_nickname, auto_message_count FROM users WHERE last_interaction < ? AND step >= 4 AND auto_message_count < 3",
-                        (cutoff_time,)
-                    )
-                    idle_users = c.fetchall()
+            idle_users = get_idle_users(MAX_IDLE_HOURS)
             for user_id, bot_name, user_nickname, auto_count in idle_users:
                 try:
-                    messages = get_auto_messages(bot_name, user_id)
+                    messages = get_auto_messages(bot_name, user_nickname)
                     message_index = min(auto_count, len(messages) - 1)
                     message = messages[message_index]
                     line_bot_api.push_message(user_id, TextSendMessage(text=message))
-                    with db_lock:
-                        with get_db() as conn:
-                            c = conn.cursor()
-                            c.execute("UPDATE users SET auto_message_count = auto_message_count + 1, last_interaction=? WHERE user_id=?", (datetime.now().isoformat(), user_id))
-                            conn.commit()
+                    increment_auto_message_count(user_id)
                     time.sleep(1)
+                except LineBotApiError as e:
+                    print(f"LINE API error for {user_id}: {e}")
                 except Exception as e:
                     print(f"Failed to send auto message to {user_id}: {e}")
         except Exception as e:
             print(f"Error in auto-message loop: {e}")
         time.sleep(CHECK_INTERVAL)
 
-def generate_ai_response(user_message, bot_name=None, user_id=None):
-    nickname = get_random_nickname(user_id)
-    personality = get_bot_personality_prompt(bot_name)
+# ألقاب عشوائية للردود
+def get_random_nickname(exclude=None):
+    choices = [n for n in NICKNAMES if n != exclude] if exclude else NICKNAMES
+    return random.choice(choices) if choices else NICKNAMES[0]
+
+def generate_ai_response(user_message, bot_name=None, last_nickname=None):
+    nickname = get_random_nickname(exclude=last_nickname)
+    personality = f"""أنت {bot_name or "وتين"}، فتاة ودودة وحنونة. تتحدث مع {nickname} بلطف، جمل قصيرة ومباشرة، بدون إيموجي، بدون تكرار."""
     prompt = f"""{personality}
 
 رسالة المستخدم:
 {user_message}
 
-ردك (قصير ومباشر، بدون إيموجي):"""
+ردك (مختصر، مباشر، 1-2 جملة، بدون إيموجي):
+"""
     try:
         response = model.generate_content(prompt, generation_config=generation_config)
         ai_reply = response.text.strip()
         if not ai_reply:
-            return f"{nickname}، مافهمتك وضح لي أكثر"
-        return f"{nickname}، {ai_reply[:4900]}"
+            ai_reply = "مافهمتك، وضح لي أكثر"
+        return f"{nickname}، {ai_reply}", nickname
     except Exception as e:
         print(f"Gemini API error: {e}")
-        return f"{nickname}، صار عندي خطأ بسيط، حاول مرة ثانية"
+        return "معذرة، صار خطأ بسيط. حاول مرة ثانية", last_nickname
 
 # معالجة الرسائل
 @handler.add(MessageEvent, message=TextMessage)
@@ -221,38 +216,39 @@ def handle_message(event):
             create_user(user_id)
             user = get_user(user_id)
         user_id_db, bot_name, user_nickname, last_interaction, step, auto_count = user
+
+        # إعادة تعيين عداد الرسائل التلقائية
         if auto_count > 0:
-            with db_lock:
-                with get_db() as conn:
-                    c = conn.cursor()
-                    c.execute("UPDATE users SET auto_message_count=0 WHERE user_id=?", (user_id,))
-                    conn.commit()
-        # أوامر مساعدة وتشغيل
-        if user_message.lower() in ["مساعدة", "help"]:
-            reply = random.choice(["لبيه", "قلبي"])
-        elif user_message.lower() in ["تشغيل", "run"]:
-            reply = "البوت يشتغل"
-        # خطوات اختيار اسم البوت
+            reset_auto_message_count(user_id)
+
+        # أمر المساعدة
+        if user_message.lower() in ["مساعدة", "help", "/help", "/start"]:
+            reply = f"{random.choice(['لبيه', 'قلبي'])}\nأهلاً أنا بوت. وش تحب تسميني؟ اختار لي اسم يعجبك"
+            update_user(user_id, step=1)
         elif step == 1:
-            reply = "أهلاً\nوش تحب تسميني؟ اختار لي اسم يعجبك"
+            reply = "أهلاً أنا بوت\nوش تحب تسميني؟ اختار لي اسم يعجبك"
             update_user(user_id, step=2)
         elif step == 2:
             chosen_name = user_message.strip()
             update_user(user_id, bot_name=chosen_name, step=3)
-            reply = f"يعجبني الاسم\nمن اليوم أنا {chosen_name}\nوأنت وش أناديك؟"
+            reply = f"تمام! من اليوم أنا {chosen_name}. وش تحب أن أناديك؟"
         elif step == 3:
             chosen_nickname = user_message.strip()
             update_user(user_id, user_nickname=chosen_nickname, step=4)
-            reply = f"حلو يا {chosen_nickname}\nكيف حالك؟"
+            reply = f"حلو يا {chosen_nickname}، نبدأ المحادثة! كيف حالك؟"
         else:
-            reply = generate_ai_response(user_message, bot_name, user_id)
+            reply, new_nickname = generate_ai_response(user_message, bot_name, last_nickname=user_nickname)
             save_conversation(user_id, user_message, reply)
-            update_user(user_id)
+            update_user(user_id, user_nickname=new_nickname)
+
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
     except Exception as e:
         print(f"Error handling message: {e}")
         try:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="معذرة، صار خطأ. جرب مرة ثانية"))
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="معذرة، صار خطأ. جرب مرة ثانية")
+            )
         except:
             pass
 
@@ -271,22 +267,12 @@ def callback():
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LoveBot is running!", 200
-
-@app.route("/health", methods=["GET"])
-def health():
-    try:
-        with get_db() as conn:
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM users")
-            user_count = c.fetchone()[0]
-        return {"status": "healthy", "users": user_count}, 200
-    except Exception as e:
-        return {"status": "error", "message": str(e)}, 500
+    return "🤖 LoveBot is running!", 200
 
 if __name__ == "__main__":
     init_db()
-    threading.Thread(target=send_auto_messages, daemon=True).start()
+    auto_thread = threading.Thread(target=send_auto_messages, daemon=True)
+    auto_thread.start()
     port = int(os.getenv("PORT", 10000))
     print(f"🚀 Starting LoveBot on port {port}...")
     app.run(host="0.0.0.0", port=port, debug=False)
