@@ -20,11 +20,23 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # Gemini AI
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'YOUR_GEMINI_API_KEY')
-genai.configure(api_key=GEMINI_API_KEY)
+
+# التحقق من وجود API Key
+if not GEMINI_API_KEY or GEMINI_API_KEY == 'YOUR_GEMINI_API_KEY':
+    print("⚠️ WARNING: GEMINI_API_KEY not set!")
+    print("⚠️ Please set environment variable: export GEMINI_API_KEY='your_key'")
+else:
+    print(f"✓ Gemini API Key loaded: {GEMINI_API_KEY[:20]}...")
+
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+    print("✓ Gemini API configured successfully")
+except Exception as e:
+    print(f"❌ Failed to configure Gemini API: {e}")
 
 # إعدادات AI محسّنة للواقعية
 generation_config = {
-    "temperature": 0.85,  # زيادة الإبداع
+    "temperature": 0.85,
     "top_p": 0.95,
     "top_k": 50,
     "max_output_tokens": 1200,
@@ -37,11 +49,26 @@ safety_settings = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
 
-model = genai.GenerativeModel(
-    model_name="gemini-2.0-flash-exp",
-    generation_config=generation_config,
-    safety_settings=safety_settings
-)
+try:
+    model = genai.GenerativeModel(
+        model_name="gemini-2.0-flash-exp",
+        generation_config=generation_config,
+        safety_settings=safety_settings
+    )
+    print("✓ Gemini Model initialized: gemini-2.0-flash-exp")
+except Exception as e:
+    print(f"❌ Failed to initialize gemini-2.0-flash-exp: {e}")
+    print("🔄 Trying fallback model: gemini-1.5-flash...")
+    try:
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            generation_config=generation_config,
+            safety_settings=safety_settings
+        )
+        print("✓ Gemini Model initialized: gemini-1.5-flash (fallback)")
+    except Exception as e2:
+        print(f"❌ Failed to initialize fallback model: {e2}")
+        model = None
 
 # ===== قاعدة البيانات =====
 DB_NAME = 'users.db'
@@ -473,8 +500,39 @@ def broadcast_to_all(message_text):
 
 # ===== تشغيل البوت =====
 if __name__ == "__main__":
+    print("=" * 60)
+    print("🤖 LINE LoveBot - Starting...")
+    print("=" * 60)
+    
+    # التحقق من المتغيرات البيئية
+    print("\n📋 Checking environment variables:")
+    print(f"  LINE_CHANNEL_ACCESS_TOKEN: {'✓ Set' if LINE_CHANNEL_ACCESS_TOKEN != 'YOUR_CHANNEL_ACCESS_TOKEN' else '✗ Not set'}")
+    print(f"  LINE_CHANNEL_SECRET: {'✓ Set' if LINE_CHANNEL_SECRET != 'YOUR_CHANNEL_SECRET' else '✗ Not set'}")
+    print(f"  GEMINI_API_KEY: {'✓ Set' if GEMINI_API_KEY != 'YOUR_GEMINI_API_KEY' else '✗ Not set'}")
+    
+    # تهيئة قاعدة البيانات
+    print("\n💾 Initializing database...")
     init_db()
-    print("=" * 50)
-    print("🤖 LINE LoveBot جاهز للعمل!")
-    print("=" * 50)
+    print("✓ Database initialized")
+    
+    # اختبار Gemini API
+    print("\n🧪 Testing Gemini API connection...")
+    test_result = generate_ai_response("قولي فقط: تمام")
+    
+    if test_result:
+        print(f"✓ Gemini API test successful!")
+        print(f"✓ Response: {test_result}")
+    else:
+        print("✗ Gemini API test failed!")
+        print("⚠️ Bot will start but AI features may not work")
+        print("\n💡 Troubleshooting:")
+        print("  1. Check your GEMINI_API_KEY is correct")
+        print("  2. Visit: https://aistudio.google.com/app/apikey")
+        print("  3. Ensure you have API quota remaining")
+        print("  4. Try model: gemini-1.5-flash instead")
+    
+    print("\n" + "=" * 60)
+    print("🚀 Starting Flask server...")
+    print("=" * 60 + "\n")
+    
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False)
