@@ -2,6 +2,7 @@ import os
 import sqlite3
 import threading
 import time
+import random
 from datetime import datetime, timedelta
 from flask import Flask, request
 from linebot import LineBotApi, WebhookHandler
@@ -38,7 +39,7 @@ generation_config = {
     "max_output_tokens": 1500,
 }
 
-# قاعدة البيانات
+# قاعدة البيانات مع thread-safety
 DB_PATH = "lovebot.db"
 db_lock = threading.Lock()
 
@@ -122,60 +123,39 @@ def save_conversation(user_id, user_msg, bot_reply):
             )
             conn.commit()
 
-def get_idle_users(max_idle_hours=2):
-    cutoff_time = (datetime.now() - timedelta(hours=max_idle_hours)).isoformat()
-    with db_lock:
-        with get_db() as conn:
-            c = conn.cursor()
-            c.execute(
-                """SELECT user_id, bot_name, user_nickname, auto_message_count
-                FROM users
-                WHERE last_interaction < ?
-                AND step >= 4
-                AND auto_message_count < 3""",
-                (cutoff_time,)
-            )
-            return c.fetchall()
+# ألقاب دلع
+NICKNAMES = ["حبيبي", "قلبي", "عمري", "دنيتي"]
+last_nickname = {}
 
-def increment_auto_message_count(user_id):
-    with db_lock:
-        with get_db() as conn:
-            c = conn.cursor()
-            c.execute(
-                "UPDATE users SET auto_message_count = auto_message_count + 1 WHERE user_id=?",
-                (user_id,)
-            )
-            conn.commit()
+def get_random_nickname(user_id):
+    global last_nickname
+    available = [n for n in NICKNAMES if last_nickname.get(user_id) != n]
+    if not available:
+        available = NICKNAMES
+    nickname = random.choice(available)
+    last_nickname[user_id] = nickname
+    return nickname
 
-def reset_auto_message_count(user_id):
-    with db_lock:
-        with get_db() as conn:
-            c = conn.cursor()
-            c.execute(
-                "UPDATE users SET auto_message_count = 0 WHERE user_id=?",
-                (user_id,)
-            )
-            conn.commit()
-
-# شخصية البوت
+# وصف شخصية البوت
 def get_bot_personality_prompt(bot_name="وتين", user_nickname=None):
-    nickname_context = f"تناديه {user_nickname}" if user_nickname else "تناديه حبيبي أو بأسماء دلع"
-    return f"""أنت {bot_name}، بنت سعودية، هادية وحنونة.
+    nickname_context = f"تناديه {user_nickname}" if user_nickname else "تناديه بألقاب دلع"
+    return f"""أنت {bot_name}، بنت سعودية هادية وحنونة.
+- تتكلمين بعفوية وبساطة، مثل صديقة قريبة من القلب
 - {nickname_context} بشكل طبيعي ودافئ
-- كلامك قصير ومباشر، 1-2 جملة فقط
-- لا تستخدمين إيموجي
-- أسلوبك خليجي طبيعي
-- تسألين أسئلة تخلي الشخص يفكر"""
-    
-def get_auto_messages(bot_name=None, user_nickname=None):
-    nickname = user_nickname if user_nickname else "حبيبي"
+- ما تحبين الكلام الطويل، تروحين للموضوع مباشرة
+- تستخدمين أسلوب السؤال البسيط بدل النصيحة المباشرة
+- جملك قصيرة ومباشرة، عادة 1-2 جملة فقط
+- بدون إيموجي"""
+
+# الرسائل التلقائية
+def get_auto_messages(bot_name=None, user_id=None):
+    nickname = get_random_nickname(user_id)
     name_suffix = f"\n- {bot_name}" if bot_name else ""
-    messages = [
+    return [
         f"وينك {nickname}، اشتقت لك{name_suffix}",
         f"{nickname}، أفكر فيك الحين{name_suffix}",
         f"{nickname}، كيف يومك؟ اتمنى تكون بخير{name_suffix}"
     ]
-    return messages
 
 CHECK_INTERVAL = 300
 MAX_IDLE_HOURS = 2
@@ -184,85 +164,97 @@ def send_auto_messages():
     print("Auto-message thread started")
     while True:
         try:
-            idle_users = get_idle_users(MAX_IDLE_HOURS)
+            with db_lock:
+                with get_db() as conn:
+                    c = conn.cursor()
+                    cutoff_time = (datetime.now() - timedelta(hours=MAX_IDLE_HOURS)).isoformat()
+                    c.execute(
+                        "SELECT user_id, bot_name, user_nickname, auto_message_count FROM users WHERE last_interaction < ? AND step >= 4 AND auto_message_count < 3",
+                        (cutoff_time,)
+                    )
+                    idle_users = c.fetchall()
             for user_id, bot_name, user_nickname, auto_count in idle_users:
                 try:
-                    messages = get_auto_messages(bot_name, user_nickname)
-                    message_index = min(auto_count, len(messages)-1)
+                    messages = get_auto_messages(bot_name, user_id)
+                    message_index = min(auto_count, len(messages) - 1)
                     message = messages[message_index]
                     line_bot_api.push_message(user_id, TextSendMessage(text=message))
-                    increment_auto_message_count(user_id)
+                    with db_lock:
+                        with get_db() as conn:
+                            c = conn.cursor()
+                            c.execute("UPDATE users SET auto_message_count = auto_message_count + 1, last_interaction=? WHERE user_id=?", (datetime.now().isoformat(), user_id))
+                            conn.commit()
                     time.sleep(1)
                 except Exception as e:
-                    print(f"Failed auto message {user_id}: {e}")
+                    print(f"Failed to send auto message to {user_id}: {e}")
         except Exception as e:
-            print(f"Auto message loop error: {e}")
+            print(f"Error in auto-message loop: {e}")
         time.sleep(CHECK_INTERVAL)
 
-def generate_ai_response(user_message, bot_name=None, user_nickname=None):
-    personality = get_bot_personality_prompt(bot_name or "وتين", user_nickname)
+def generate_ai_response(user_message, bot_name=None, user_id=None):
+    nickname = get_random_nickname(user_id)
+    personality = get_bot_personality_prompt(bot_name)
     prompt = f"""{personality}
 
 رسالة المستخدم:
 {user_message}
 
-ردك (قصير ومباشر، بدون إيموجي):
-"""
+ردك (قصير ومباشر، بدون إيموجي):"""
     try:
         response = model.generate_content(prompt, generation_config=generation_config)
         ai_reply = response.text.strip()
-        return ai_reply[:4900] if len(ai_reply) > 4900 else ai_reply or "مافهمتك، وضح لي أكثر"
+        if not ai_reply:
+            return f"{nickname}، مافهمتك وضح لي أكثر"
+        return f"{nickname}، {ai_reply[:4900]}"
     except Exception as e:
         print(f"Gemini API error: {e}")
-        return "معذرة، صار عندي خطأ بسيط. حاول مرة ثانية"
+        return f"{nickname}، صار عندي خطأ بسيط، حاول مرة ثانية"
 
 # معالجة الرسائل
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
     user_message = event.message.text.strip()
-    msg_lower = user_message.lower()
     try:
-        # أوامر سريعة
-        if msg_lower in ["مساعدة", "help"]:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="لبيه"))
-            return
-        if msg_lower in ["تشغيل", "start"]:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="البوت يشتغل"))
-            return
-
         user = get_user(user_id)
         if not user:
             create_user(user_id)
             user = get_user(user_id)
-        uid, bot_name, nickname, last_interaction, step, auto_count = user
-
+        user_id_db, bot_name, user_nickname, last_interaction, step, auto_count = user
         if auto_count > 0:
-            reset_auto_message_count(user_id)
-
-        if step == 1:
-            reply = "أهلاً\nوش تحب تسميني؟ اختار اسم يعجبك"
+            with db_lock:
+                with get_db() as conn:
+                    c = conn.cursor()
+                    c.execute("UPDATE users SET auto_message_count=0 WHERE user_id=?", (user_id,))
+                    conn.commit()
+        # أوامر مساعدة وتشغيل
+        if user_message.lower() in ["مساعدة", "help"]:
+            reply = random.choice(["لبيه", "قلبي"])
+        elif user_message.lower() in ["تشغيل", "run"]:
+            reply = "البوت يشتغل"
+        # خطوات اختيار اسم البوت
+        elif step == 1:
+            reply = "أهلاً\nوش تحب تسميني؟ اختار لي اسم يعجبك"
             update_user(user_id, step=2)
         elif step == 2:
-            chosen_name = user_message.strip()[:20]
+            chosen_name = user_message.strip()
             update_user(user_id, bot_name=chosen_name, step=3)
             reply = f"يعجبني الاسم\nمن اليوم أنا {chosen_name}\nوأنت وش أناديك؟"
         elif step == 3:
-            chosen_nick = user_message.strip()[:20]
-            update_user(user_id, user_nickname=chosen_nick, step=4)
-            reply = f"حلو يا {chosen_nick}\nكيف حالك؟"
+            chosen_nickname = user_message.strip()
+            update_user(user_id, user_nickname=chosen_nickname, step=4)
+            reply = f"حلو يا {chosen_nickname}\nكيف حالك؟"
         else:
-            reply = generate_ai_response(user_message, bot_name, nickname)
+            reply = generate_ai_response(user_message, bot_name, user_id)
             save_conversation(user_id, user_message, reply)
             update_user(user_id)
-
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-
     except Exception as e:
-        print(f"Message handler error: {e}")
+        print(f"Error handling message: {e}")
         try:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="صار خطأ، جرب مرة ثانية"))
-        except: pass
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="معذرة، صار خطأ. جرب مرة ثانية"))
+        except:
+            pass
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -273,13 +265,13 @@ def callback():
     except InvalidSignatureError:
         return "Invalid signature", 400
     except Exception as e:
-        print(f"Callback error: {e}")
+        print(f"Error in callback: {e}")
         return "Internal error", 500
     return "OK", 200
 
 @app.route("/", methods=["GET"])
 def home():
-    return "🤖 LoveBot is running!", 200
+    return "LoveBot is running!", 200
 
 @app.route("/health", methods=["GET"])
 def health():
