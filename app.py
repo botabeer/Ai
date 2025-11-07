@@ -2,7 +2,6 @@ import os
 import sqlite3
 import threading
 import time
-import random
 from datetime import datetime, timedelta
 from flask import Flask, request
 from linebot import LineBotApi, WebhookHandler
@@ -10,6 +9,7 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from dotenv import load_dotenv
 import google.generativeai as genai
+import random
 from contextlib import contextmanager
 
 # تحميل المتغيرات البيئية
@@ -25,11 +25,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, GEMINI_API_KEY]):
     raise ValueError("Missing required environment variables")
 
-# LINE Bot
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Gemini
+# Gemini AI
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.0-flash-exp")
 generation_config = {
@@ -39,7 +38,7 @@ generation_config = {
     "max_output_tokens": 1500,
 }
 
-# قاعدة البيانات
+# قاعدة البيانات مع thread-safety
 DB_PATH = "lovebot.db"
 db_lock = threading.Lock()
 
@@ -68,10 +67,11 @@ def init_db():
             user_msg TEXT,
             bot_reply TEXT,
             timestamp TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(user_id)
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
         )''')
         conn.commit()
 
+# وظائف قاعدة البيانات
 def get_user(user_id):
     with db_lock:
         with get_db() as conn:
@@ -129,10 +129,10 @@ def get_idle_users(max_idle_hours=2):
             c = conn.cursor()
             c.execute(
                 """SELECT user_id, bot_name, user_nickname, auto_message_count
-                FROM users
-                WHERE last_interaction < ?
-                AND step >= 4
-                AND auto_message_count < 3""",
+                   FROM users
+                   WHERE last_interaction < ?
+                   AND step >= 4
+                   AND auto_message_count < 3""",
                 (cutoff_time,)
             )
             return c.fetchall()
@@ -141,63 +141,66 @@ def increment_auto_message_count(user_id):
     with db_lock:
         with get_db() as conn:
             c = conn.cursor()
-            c.execute(
-                "UPDATE users SET auto_message_count = auto_message_count + 1 WHERE user_id=?",
-                (user_id,)
-            )
+            c.execute("UPDATE users SET auto_message_count = auto_message_count + 1 WHERE user_id=?", (user_id,))
             conn.commit()
 
 def reset_auto_message_count(user_id):
     with db_lock:
         with get_db() as conn:
             c = conn.cursor()
-            c.execute(
-                "UPDATE users SET auto_message_count = 0 WHERE user_id=?",
-                (user_id,)
-            )
+            c.execute("UPDATE users SET auto_message_count = 0 WHERE user_id=?", (user_id,))
             conn.commit()
 
-def get_bot_personality_prompt(bot_name="وتين", user_nickname=None):
-    nickname_context = "تناديه حبيبي أو بأسماء دلع" if not user_nickname else f"تناديه {user_nickname}"
-    return f"""أنت {bot_name}، بنت سعودية ودودة وحنونة، مختصرة في الردود.
-تتكلمين بعفوية، جمل قصيرة، باللهجة الخليجية السعودية، بدون إيموجي.
-{nickname_context} بشكل دافئ، تعطي حلول غير مباشرة لمشاكل العلاقات، تساعد على تطوير الذات والثقة بالنفس، بدون نصائح مباشرة."""
+# ألقاب عاطفية
+NICKNAMES = ["حبيبي", "قلبي", "يا روحي", "دنيتي", "يا بعد عمري"]
 
-USER_LIQUID_NAMES = ["حبيبي", "قلبي", "يا روحي", "دنيتي", "يا بعد عمري"]
-
-def choose_user_nickname():
-    return random.choice(USER_LIQUID_NAMES)
+def get_random_nickname(last_used=None):
+    choices = [n for n in NICKNAMES if n != last_used]
+    if not choices:
+        choices = NICKNAMES
+    return random.choice(choices)
 
 def get_auto_messages(bot_name=None, user_nickname=None):
-    nickname = user_nickname if user_nickname else choose_user_nickname()
+    nickname = get_random_nickname()
     name_suffix = f"\n- {bot_name}" if bot_name else ""
     messages = [
-        f"{nickname}، وينك؟ اشتقت لك{name_suffix}",
+        f"{nickname}، اشتقت لك{name_suffix}",
         f"{nickname}، أفكر فيك الحين{name_suffix}",
         f"{nickname}، كيف يومك؟ اتمنى تكون بخير{name_suffix}"
     ]
     return messages
 
-CHECK_INTERVAL = 300
-MAX_IDLE_HOURS = 2
-
 def send_auto_messages():
+    print("Auto-message thread started")
     while True:
         try:
-            idle_users = get_idle_users(MAX_IDLE_HOURS)
+            idle_users = get_idle_users()
             for user_id, bot_name, user_nickname, auto_count in idle_users:
                 try:
                     messages = get_auto_messages(bot_name, user_nickname)
-                    message_index = min(auto_count, len(messages)-1)
+                    message_index = min(auto_count, len(messages) - 1)
                     message = messages[message_index]
                     line_bot_api.push_message(user_id, TextSendMessage(text=message))
                     increment_auto_message_count(user_id)
                     time.sleep(1)
+                except LineBotApiError as e:
+                    print(f"LINE API error for {user_id}: {e}")
                 except Exception as e:
-                    print(f"Failed auto message to {user_id}: {e}")
+                    print(f"Failed to send auto message to {user_id}: {e}")
         except Exception as e:
-            print(f"Auto-message loop error: {e}")
-        time.sleep(CHECK_INTERVAL)
+            print(f"Error in auto-message loop: {e}")
+        time.sleep(300)  # 5 دقائق
+
+# شخصية البوت
+def get_bot_personality_prompt(bot_name="وتين", user_nickname=None):
+    nickname_context = f"تناديه {user_nickname}" if user_nickname else "تناديه بلقب عاطفي مثل حبيبي أو قلبي"
+    return f"""
+أنت {bot_name}، بنت سعودية ودودة وحنونة. 
+جمل قصيرة، مباشرة، ودية، باللهجة الخليجية السعودية. 
+تركزين على تطوير الذات، تعزيز الثقة بالنفس، والمساندة العاطفية بطريقة غير مباشرة. 
+تحدثي بأسلوب عفوي ومرن، بدون إيموجي، بدون مبالغة.
+{nickname_context}.
+"""
 
 def generate_ai_response(user_message, bot_name=None, user_nickname=None):
     personality = get_bot_personality_prompt(bot_name or "وتين", user_nickname)
@@ -206,24 +209,16 @@ def generate_ai_response(user_message, bot_name=None, user_nickname=None):
 رسالة المستخدم:
 {user_message}
 
-## قواعد الرد:
-- ركز على تطوير الذات والثقة بالنفس
-- ساعد في تجاوز الصعوبات العاطفية بطريقة غير مباشرة
-- استخدم جمل قصيرة ومباشرة، 1-2 جملة
-- ودية، عفوية، بدون إيموجي
-- اعط أمثلة أو حلول واقعية بدون إعطاء أوامر مباشرة
-
-ردك:"""
+ردك (قصير ودافئ، بدون إيموجي):"""
     try:
         response = model.generate_content(prompt, generation_config=generation_config)
         ai_reply = response.text.strip()
-        if not ai_reply:
-            return "مافهمتك، وضح لي أكثر"
-        return ai_reply[:4900]
+        return ai_reply[:4900] if len(ai_reply) > 4900 else ai_reply or "مافهمتك، وضح لي أكثر"
     except Exception as e:
         print(f"Gemini API error: {e}")
         return "معذرة، صار عندي خطأ بسيط. حاول مرة ثانية"
 
+# معالجة الرسائل
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
@@ -233,28 +228,26 @@ def handle_message(event):
         if not user:
             create_user(user_id)
             user = get_user(user_id)
-
+        
         user_id_db, bot_name, user_nickname, last_interaction, step, auto_count = user
 
         if auto_count > 0:
             reset_auto_message_count(user_id)
 
-        # أمر مساعدة
-        if user_message.lower() in ["مساعدة", "help"]:
-            nickname = choose_user_nickname()
-            update_user(user_id, user_nickname=nickname, step=4)
-            reply = f"{nickname}، وش تحب تسميني؟ اختار لي اسم يعجبك"
-        elif step == 1:
-            reply = "أهلاً أنا بوت\nوش تحب تسميني؟ اختار لي اسم يعجبك"
+        nickname = get_random_nickname()
+
+        # أمر المساعدة
+        if user_message.lower() in ["مساعدة", "help", "/help", "/start"] and step == 1:
+            reply = f"{nickname}، أهلاً! وش تحب تسميني؟ اختار لي اسم يعجبك"
             update_user(user_id, step=2)
         elif step == 2:
             chosen_name = user_message.strip()
             update_user(user_id, bot_name=chosen_name, step=3)
-            reply = f"تمام! من اليوم أنا {chosen_name}\nوش تحب أناديك؟"
+            reply = f"تمام! من اليوم أنا {chosen_name}\n{nickname}، وش أخبارك اليوم؟"
         elif step == 3:
             chosen_nickname = user_message.strip()
             update_user(user_id, user_nickname=chosen_nickname, step=4)
-            reply = f"{chosen_nickname}، كيف حالك اليوم؟"
+            reply = f"{nickname}، دوم يارب تكون بخير! وش مسوي اليوم؟"
         else:
             reply = generate_ai_response(user_message, bot_name, user_nickname)
             save_conversation(user_id, user_message, reply)
@@ -264,10 +257,14 @@ def handle_message(event):
     except Exception as e:
         print(f"Error handling message: {e}")
         try:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="معذرة، صار خطأ. جرب مرة ثانية"))
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="معذرة، صار خطأ. جرب مرة ثانية")
+            )
         except:
             pass
 
+# Webhook
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature")
@@ -284,17 +281,6 @@ def callback():
 @app.route("/", methods=["GET"])
 def home():
     return "🤖 LoveBot is running!", 200
-
-@app.route("/health", methods=["GET"])
-def health():
-    try:
-        with get_db() as conn:
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM users")
-            user_count = c.fetchone()[0]
-        return {"status": "healthy", "users": user_count}, 200
-    except Exception as e:
-        return {"status": "error", "message": str(e)}, 500
 
 if __name__ == "__main__":
     init_db()
