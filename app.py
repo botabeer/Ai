@@ -212,7 +212,7 @@ def generate_ai_response(user_message, bot_name="وتين", user_id=None):
         if "Quota exceeded" in str(e):
             return f"{title}، انشغلت ما اقدر ارد عليك، خلينا نكمل المحادثة بكرة إن شاء الله."
         logger.error(f"Gemini API error: {e}")
-        return f"{title}، حبيبي، انشغلت ما اقدر ارد عليك، خلينا نكمل المحادثة بكرة إن شاء الله."
+        return f"{title}، انشغلت ما اقدر ارد عليك، خلينا نكمل المحادثة بكرة إن شاء الله."
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
