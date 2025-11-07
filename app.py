@@ -1,25 +1,35 @@
 import os
 import sqlite3
 from datetime import datetime
-from flask import Flask, request
+from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-from linebot.exceptions import InvalidSignatureError
+from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from dotenv import load_dotenv
 import google.generativeai as genai
 import random
+import logging
+from contextlib import contextmanager
+
+# إعداد السجلات
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # تحميل المتغيرات البيئية
 load_dotenv()
 
 app = Flask(__name__)
 
+# التحقق من المتغيرات البيئية
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, GEMINI_API_KEY]):
-    raise ValueError("Missing required environment variables")
+    raise ValueError("❌ Missing required environment variables")
 
 # LINE Bot
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
@@ -35,134 +45,310 @@ generation_config = {
     "max_output_tokens": 1500,
 }
 
-# قاعدة البيانات
+# إعداد قاعدة البيانات
 DB_PATH = "lovebot.db"
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS users (
-    user_id TEXT PRIMARY KEY,
-    bot_name TEXT,
-    user_nickname TEXT,
-    last_interaction TEXT,
-    step INTEGER DEFAULT 1
-)''')
-c.execute('''CREATE TABLE IF NOT EXISTS conversations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT,
-    user_msg TEXT,
-    bot_reply TEXT,
-    timestamp TEXT
-)''')
-conn.commit()
+
+def init_db():
+    """تهيئة قاعدة البيانات"""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            bot_name TEXT DEFAULT 'وتين',
+            user_nickname TEXT,
+            last_interaction TEXT,
+            step INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            user_msg TEXT,
+            bot_reply TEXT,
+            timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )''')
+        # إضافة فهرس لتحسين الأداء
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_user_id 
+                     ON conversations(user_id)''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_timestamp 
+                     ON conversations(timestamp)''')
+        conn.commit()
+        logger.info("✅ Database initialized successfully")
+
+@contextmanager
+def get_db_connection():
+    """إدارة اتصال قاعدة البيانات بشكل آمن"""
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 def get_user(user_id):
-    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    return c.fetchone()
+    """الحصول على بيانات المستخدم"""
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+            return c.fetchone()
+    except sqlite3.Error as e:
+        logger.error(f"Database error in get_user: {e}")
+        return None
 
 def create_user(user_id):
-    now = datetime.now().isoformat()
-    c.execute("INSERT OR IGNORE INTO users (user_id, last_interaction, step) VALUES (?, ?, 1)",
-              (user_id, now))
-    conn.commit()
+    """إنشاء مستخدم جديد"""
+    try:
+        now = datetime.now().isoformat()
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute(
+                "INSERT OR IGNORE INTO users (user_id, last_interaction, step) VALUES (?, ?, 1)",
+                (user_id, now)
+            )
+            conn.commit()
+            logger.info(f"✅ New user created: {user_id}")
+    except sqlite3.Error as e:
+        logger.error(f"Database error in create_user: {e}")
 
 def update_user(user_id, bot_name=None, user_nickname=None, step=None):
-    now = datetime.now().isoformat()
-    query = "UPDATE users SET last_interaction=?"
-    params = [now]
-    if bot_name is not None:
-        query += ", bot_name=?"
-        params.append(bot_name)
-    if user_nickname is not None:
-        query += ", user_nickname=?"
-        params.append(user_nickname)
-    if step is not None:
-        query += ", step=?"
-        params.append(step)
-    query += " WHERE user_id=?"
-    params.append(user_id)
-    c.execute(query, tuple(params))
-    conn.commit()
+    """تحديث بيانات المستخدم"""
+    try:
+        now = datetime.now().isoformat()
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            query = "UPDATE users SET last_interaction=?"
+            params = [now]
+            
+            if bot_name is not None:
+                query += ", bot_name=?"
+                params.append(bot_name)
+            if user_nickname is not None:
+                query += ", user_nickname=?"
+                params.append(user_nickname)
+            if step is not None:
+                query += ", step=?"
+                params.append(step)
+            
+            query += " WHERE user_id=?"
+            params.append(user_id)
+            
+            c.execute(query, tuple(params))
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Database error in update_user: {e}")
 
 def save_conversation(user_id, user_msg, bot_reply):
-    now = datetime.now().isoformat()
-    c.execute("INSERT INTO conversations (user_id, user_msg, bot_reply, timestamp) VALUES (?, ?, ?, ?)",
-              (user_id, user_msg, bot_reply, now))
-    conn.commit()
+    """حفظ المحادثة"""
+    try:
+        now = datetime.now().isoformat()
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO conversations (user_id, user_msg, bot_reply, timestamp) VALUES (?, ?, ?, ?)",
+                (user_id, user_msg, bot_reply, now)
+            )
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Database error in save_conversation: {e}")
+
+def get_conversation_history(user_id, limit=5):
+    """الحصول على سجل المحادثات الأخيرة"""
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT user_msg, bot_reply FROM conversations WHERE user_id=? ORDER BY timestamp DESC LIMIT ?",
+                (user_id, limit)
+            )
+            return c.fetchall()
+    except sqlite3.Error as e:
+        logger.error(f"Database error in get_conversation_history: {e}")
+        return []
 
 # ألقاب المستخدم
-USER_TITLES = ["حبيبي", "قلبي", "يا روحي", "يا بعد عمري", "دنيتي", "عمري"]
+USER_TITLES = ["حبيبي", "قلبي", "يا روحي", "يا بعد عمري", "دنيتي", "عمري", "يا غالي"]
 
 def get_random_title():
+    """اختيار لقب عشوائي"""
     return random.choice(USER_TITLES)
 
-def generate_ai_response(user_message, bot_name="وتين"):
-    """توليد ردود ذكية قصيرة بأسلوب ودود وحنون"""
+def generate_ai_response(user_message, bot_name="وتين", user_id=None):
+    """توليد ردود ذكية بأسلوب ودود وحنون"""
     title = get_random_title()
-    personality_prompt = f"""
-أنت {bot_name}، بنت خليجية سعودية ودودة وحنونة، تتحدث بأسلوب مباشر وبسيط، مختصر، بدون إيموجي، 
-تحب مخاطبة المستخدم دائمًا بألقاب مثل "حبيبي"، "قلبي"، "يا روحي"، بدون استخدام اسمه.
-تركز على الدعم النفسي، تطوير الشخصية، تعزيز الثقة بالنفس، وتقديم حلول مناسبة للعلاقات العاطفية بطريقة غير مباشرة.
-"""
-    prompt = f"""{personality_prompt}
+    
+    # إضافة سياق من المحادثات السابقة
+    context = ""
+    if user_id:
+        history = get_conversation_history(user_id, limit=3)
+        if history:
+            context = "\n## المحادثات السابقة:\n"
+            for msg in reversed(history):
+                context += f"المستخدم: {msg['user_msg']}\n{bot_name}: {msg['bot_reply']}\n"
+    
+    personality_prompt = f"""أنت {bot_name}، بنت خليجية سعودية ودودة وحنونة، تتحدث بأسلوب مباشر وبسيط ومختصر.
+- لا تستخدم إيموجي نهائياً
+- خاطب المستخدم دائماً بألقاب مثل "حبيبي"، "قلبي"، "يا روحي"
+- ركز على الدعم النفسي وتطوير الشخصية وتعزيز الثقة بالنفس
+- قدم نصائح عملية للعلاقات العاطفية بطريقة غير مباشرة
+- كن مختصراً: 1-3 جمل فقط
+- تجنب التكرار واستخدم أسلوباً متنوعاً{context}
 
-## رسالة المستخدم:
+## رسالة المستخدم الحالية:
 {user_message}
 
-## ردك (قصير، ودود، ذكي، 1-2 جملة، مخاطبة المستخدم باللقب):
-"""
+## ردك المختصر (1-3 جمل، بدون إيموجي):"""
+
     try:
-        response = model.generate_content(prompt, generation_config=generation_config)
+        response = model.generate_content(
+            prompt,
+            generation_config=generation_config
+        )
         ai_reply = response.text.strip()
+        
         if not ai_reply:
-            return f"{title}, ما فهمتك وضح لي أكثر"
+            return f"{title}, ما فهمتك زين. وضح لي أكثر"
+        
+        # تنظيف الرد من الإيموجي المحتملة
+        ai_reply = remove_emojis(ai_reply)
+        
+        # التأكد من عدم تجاوز حد LINE
         return ai_reply[:4900]
-    except Exception:
-        return f"{title}, معذرة، صار عندي خطأ بسيط. حاول مرة ثانية"
+        
+    except Exception as e:
+        logger.error(f"Gemini API error: {e}")
+        return f"{title}, معذرة صار عندي خطأ بسيط. جرب مرة ثانية"
+
+def remove_emojis(text):
+    """إزالة الإيموجي من النص"""
+    import re
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"  # emoticons
+        "\U0001F300-\U0001F5FF"  # symbols & pictographs
+        "\U0001F680-\U0001F6FF"  # transport & map symbols
+        "\U0001F700-\U0001F77F"  # alchemical symbols
+        "\U0001F780-\U0001F7FF"  # Geometric Shapes Extended
+        "\U0001F800-\U0001F8FF"  # Supplemental Arrows-C
+        "\U0001F900-\U0001F9FF"  # Supplemental Symbols and Pictographs
+        "\U0001FA00-\U0001FA6F"  # Chess Symbols
+        "\U0001FA70-\U0001FAFF"  # Symbols and Pictographs Extended-A
+        "\U00002702-\U000027B0"  # Dingbats
+        "\U000024C2-\U0001F251" 
+        "]+", flags=re.UNICODE
+    )
+    return emoji_pattern.sub(r'', text)
 
 # معالجة الرسائل
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
+    """معالجة رسائل LINE"""
     user_id = event.source.user_id
     user_message = event.message.text.strip()
+    
+    # التحقق من طول الرسالة
+    if len(user_message) > 5000:
+        reply = f"{get_random_title()}, رسالتك طويلة جداً. اختصرها شوي"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+    
+    # الحصول على بيانات المستخدم
     user = get_user(user_id)
     if not user:
         create_user(user_id)
         user = get_user(user_id)
-    user_id_db, bot_name, user_nickname, last_interaction, step = user
-
-    # أمر المساعدة يبدأ المحادثة
-    if user_message.lower() in ["مساعدة", "help", "/help", "/start"]:
-        reply = f"{get_random_title()}, أهلاً أنا بوت\nوش تحب تسميني؟ اختار لي اسم يعجبك"
+    
+    if not user:
+        logger.error(f"Failed to get/create user: {user_id}")
+        return
+    
+    bot_name = user['bot_name'] or 'وتين'
+    step = user['step']
+    
+    # معالجة أوامر المساعدة
+    if user_message.lower() in ["مساعدة", "help", "/help", "/start", "بداية"]:
+        reply = f"{get_random_title()}, أهلاً حبيبي! \nأنا بوت \nوش تحب تسميني؟ اختار لي اسم يعجبك"
         update_user(user_id, step=2)
+    
+    # خطوة اختيار الاسم
     elif step == 2:
-        chosen_name = user_message.strip()
-        update_user(user_id, bot_name=chosen_name, step=3)
-        reply = f"{get_random_title()}, تمام! من اليوم أنا {chosen_name}. وش مسوي اليوم؟"
+        chosen_name = user_message.strip()[:50]  # تحديد طول الاسم
+        if len(chosen_name) < 2:
+            reply = f"{get_random_title()}, اختار اسم أطول شوي"
+        else:
+            update_user(user_id, bot_name=chosen_name, step=3)
+            reply = f"{get_random_title()}, تمام! من اليوم أنا {chosen_name} 🤍\nكيف حالك اليوم؟"
+    
+    # المحادثة العادية
     else:
-        reply = generate_ai_response(user_message, bot_name)
+        reply = generate_ai_response(user_message, bot_name, user_id)
         save_conversation(user_id, user_message, reply)
         update_user(user_id)
-
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    
+    # إرسال الرد
+    try:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    except LineBotApiError as e:
+        logger.error(f"LINE API error: {e}")
 
 @app.route("/callback", methods=["POST"])
 def callback():
+    """معالجة Webhook من LINE"""
     signature = request.headers.get("X-Line-Signature")
+    if not signature:
+        logger.warning("Missing X-Line-Signature header")
+        abort(400)
+    
     body = request.get_data(as_text=True)
+    
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        return "Invalid signature", 400
+        logger.error("Invalid signature")
+        abort(400)
     except Exception as e:
-        print(f"Error in callback: {e}")
-        return "Internal error", 500
+        logger.error(f"Error in callback: {e}", exc_info=True)
+        abort(500)
+    
     return "OK", 200
 
 @app.route("/", methods=["GET"])
 def home():
-    return "LoveBot is running!", 200
+    """الصفحة الرئيسية"""
+    return """
+    <html>
+        <head><title>LoveBot</title></head>
+        <body style='font-family: Arial; text-align: center; padding: 50px;'>
+            <h1>💙 LoveBot is Running!</h1>
+            <p>Your emotional support companion is ready.</p>
+        </body>
+    </html>
+    """, 200
+
+@app.route("/health", methods=["GET"])
+def health():
+    """نقطة فحص صحة الخدمة"""
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}, 200
+
+@app.errorhandler(404)
+def not_found(error):
+    return {"error": "Not found"}, 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    logger.error(f"Internal server error: {error}")
+    return {"error": "Internal server error"}, 500
 
 if __name__ == "__main__":
+    # تهيئة قاعدة البيانات
+    init_db()
+    
+    # تشغيل الخادم
     port = int(os.getenv("PORT", 10000))
-    print(f"🚀 Starting LoveBot on port {port}...")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    debug = os.getenv("DEBUG", "False").lower() == "true"
+    
+    logger.info(f"🚀 Starting LoveBot on port {port}...")
+    logger.info(f"📝 Debug mode: {debug}")
+    
+    app.run(host="0.0.0.0", port=port, debug=debug)
