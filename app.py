@@ -11,19 +11,16 @@ import random
 import logging
 from contextlib import contextmanager
 
-# إعداد السجلات
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# تحميل المتغيرات البيئية
 load_dotenv()
 
 app = Flask(__name__)
 
-# التحقق من المتغيرات البيئية
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -31,11 +28,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, GEMINI_API_KEY]):
     raise ValueError("❌ Missing required environment variables")
 
-# LINE Bot
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Gemini AI
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.0-flash-exp")
 generation_config = {
@@ -45,7 +40,6 @@ generation_config = {
     "max_output_tokens": 1500,
 }
 
-# إعداد قاعدة البيانات
 DB_PATH = "lovebot.db"
 
 def init_db():
@@ -67,10 +61,8 @@ def init_db():
             timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(user_id)
         )''')
-        c.execute('''CREATE INDEX IF NOT EXISTS idx_user_id 
-                     ON conversations(user_id)''')
-        c.execute('''CREATE INDEX IF NOT EXISTS idx_timestamp 
-                     ON conversations(timestamp)''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_user_id ON conversations(user_id)''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_timestamp ON conversations(timestamp)''')
         conn.commit()
         logger.info("✅ Database initialized successfully")
 
@@ -146,7 +138,7 @@ def save_conversation(user_id, user_msg, bot_reply):
     except sqlite3.Error as e:
         logger.error(f"Database error in save_conversation: {e}")
 
-def get_conversation_history(user_id, limit=5):
+def get_conversation_history(user_id, limit=3):
     try:
         with get_db_connection() as conn:
             c = conn.cursor()
@@ -159,50 +151,11 @@ def get_conversation_history(user_id, limit=5):
         logger.error(f"Database error in get_conversation_history: {e}")
         return []
 
-# ألقاب المستخدم
-USER_TITLES = ["حبيبي", "قلبي", "يا روحي", "يا بعد عمري", "دنيتي", "عمري", "جنتي"]
+USER_TITLES = ["حبيبي", "قلبي", "يا روحي", "جنتي", "يا بعد عمري", "دنيتي", "عمري"]
 
 def get_random_title():
     return random.choice(USER_TITLES)
 
-def generate_ai_response(user_message, bot_name="وتين", user_id=None):
-    title = get_random_title()
-    context = ""
-    if user_id:
-        history = get_conversation_history(user_id, limit=3)
-        if history:
-            context = "\n## المحادثات السابقة:\n"
-            for msg in reversed(history):
-                context += f"المستخدم: {msg['user_msg']}\n{bot_name}: {msg['bot_reply']}\n"
-    
-    personality_prompt = f"""أنت {bot_name}، بنت خليجية سعودية ودودة وحنونة، تتحدث بأسلوب مباشر وبسيط ومختصر.
-- لا تستخدم إيموجي
-- خاطب المستخدم دائماً بألقاب مثل "حبيبي", "قلبي", "يا روحي", "جنتي"
-- ركز على الدعم النفسي وتطوير الشخصية وتعزيز الثقة بالنفس
-- قدم نصائح للعلاقات العاطفية بطريقة غير مباشرة
-- استخدم جمل قصيرة، 1-3 جمل
-- تجنب التكرار واستخدم أسلوب متنوع
-{context}
-
-## رسالة المستخدم الحالية:
-{user_message}
-
-## ردك المختصر:"""
-
-    try:
-        response = model.generate_content(
-            personality_prompt,
-            generation_config=generation_config
-        )
-        ai_reply = response.text.strip()
-        if not ai_reply:
-            return f"{title}, ما فهمتك زين. وضح لي أكثر"
-        return ai_reply[:4900]
-    except Exception as e:
-        logger.error(f"Gemini API error: {e}")
-        return f"{title}, معذرة صار عندي خطأ بسيط. جرب مرة ثانية"
-
-# إزالة أي إيموجي
 def remove_emojis(text):
     import re
     emoji_pattern = re.compile(
@@ -217,48 +170,86 @@ def remove_emojis(text):
         "\U0001FA00-\U0001FA6F"
         "\U0001FA70-\U0001FAFF"
         "\U00002702-\U000027B0"
-        "\U000024C2-\U0001F251" 
+        "\U000024C2-\U0001F251"
         "]+", flags=re.UNICODE
     )
     return emoji_pattern.sub(r'', text)
 
-# معالجة الرسائل
+def generate_ai_response(user_message, bot_name="وتين", user_id=None):
+    title = get_random_title()
+    context = ""
+    if user_id:
+        history = get_conversation_history(user_id, limit=3)
+        if history:
+            context = "\n## المحادثات السابقة:\n"
+            for msg in reversed(history):
+                context += f"المستخدم: {msg['user_msg']}\n{bot_name}: {msg['bot_reply']}\n"
+
+    personality_prompt = f"""أنت {bot_name}، بنت خليجية سعودية ودودة وحنونة، تتحدث بأسلوب مباشر وبسيط ومختصر.
+- لا تستخدم إيموجي نهائياً
+- خاطب المستخدم دائماً بألقاب مثل "حبيبي"، "قلبي"، "يا روحي", "جنتي"
+- ركز على الدعم النفسي وتطوير الشخصية وتعزيز الثقة بالنفس
+- قدم نصائح عملية للعلاقات العاطفية بطريقة غير مباشرة
+- كن مختصراً: 1-3 جمل فقط
+- تجنب التكرار واستخدم أسلوباً متنوعاً{context}
+
+## رسالة المستخدم الحالية:
+{user_message}
+
+## ردك المختصر (1-3 جمل، بدون إيموجي):"""
+
+    try:
+        response = model.generate_content(
+            personality_prompt,
+            generation_config=generation_config
+        )
+        ai_reply = response.text.strip()
+        if not ai_reply:
+            return f"{title}, ما فهمتك زين. وضح لي أكثر"
+        ai_reply = remove_emojis(ai_reply)
+        return ai_reply[:4900]
+    except Exception as e:
+        if "Quota exceeded" in str(e):
+            return f"{title}، انشغلت ما اقدر ارد عليك، خلينا نكمل المحادثة بكرة إن شاء الله."
+        logger.error(f"Gemini API error: {e}")
+        return f"{title}، حبيبي، انشغلت ما اقدر ارد عليك، خلينا نكمل المحادثة بكرة إن شاء الله."
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
     user_message = event.message.text.strip()
-
+    
+    if len(user_message) > 5000:
+        reply = f"{get_random_title()}, رسالتك طويلة جداً. اختصرها شوي"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+    
     user = get_user(user_id)
     if not user:
         create_user(user_id)
         user = get_user(user_id)
-
+    if not user:
+        logger.error(f"Failed to get/create user: {user_id}")
+        return
+    
     bot_name = user['bot_name'] or 'وتين'
     step = user['step']
-
-    # أمر المساعدة
+    
     if user_message.lower() in ["مساعدة", "help", "/help", "/start", "بداية"]:
-        if step == 1:
-            reply = f"{get_random_title()}, أهلاً!\nوش تحب تسميني؟ اختار لي اسم يعجبك"
-            update_user(user_id, step=2)
-        else:
-            reply = get_random_title()  # لقب فقط
-
-    # خطوة اختيار اسم البوت
+        reply = f"{get_random_title()}، أهلاً!\nوش تحب تسميني؟ اختار لي اسم يعجبك"
+        update_user(user_id, step=2)
     elif step == 2:
         chosen_name = user_message.strip()[:50]
         if len(chosen_name) < 2:
             reply = f"{get_random_title()}, اختار اسم أطول شوي"
         else:
             update_user(user_id, bot_name=chosen_name, step=3)
-            reply = f"{get_random_title()}, تمام! من اليوم أنا {chosen_name}\nكيف حالك اليوم؟"
-
-    # المحادثة العادية
+            reply = f"{get_random_title()}، تمام! من اليوم أنا {chosen_name}\nكيف حالك اليوم؟"
     else:
         reply = generate_ai_response(user_message, bot_name, user_id)
         save_conversation(user_id, user_message, reply)
         update_user(user_id)
-
+    
     try:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
     except LineBotApiError as e:
@@ -268,11 +259,14 @@ def handle_message(event):
 def callback():
     signature = request.headers.get("X-Line-Signature")
     if not signature:
+        logger.warning("Missing X-Line-Signature header")
         abort(400)
+    
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
+        logger.error("Invalid signature")
         abort(400)
     except Exception as e:
         logger.error(f"Error in callback: {e}", exc_info=True)
