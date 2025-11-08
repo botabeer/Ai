@@ -347,7 +347,7 @@ def generate_ai_response(user_message, bot_name="ليان", personality_type="ح
         
         if next_available:
             wait_minutes = int((next_available - current_time) / 60)
-            return f"{title}، انشغلت شوي الحين. ارجع لي بعد {wait_minutes} دقيقة تقريباً 💙"
+            return f"{title}، انشغلت شوي الحين. ارجع لي بعد {wait_minutes} دقيقة تقريباً"
         else:
             return f"{title}، في مشكلة مؤقتة. جرب مرة ثانية بعد شوي"
 
@@ -432,19 +432,85 @@ def handle_message(event):
     personality_type = user['personality_type'] or 'حبيبة'
     step = user['step']
     
+    # Handle commands
+    if user_message.lower() in ["مساعدة", "help", "/help", "الأوامر"]:
+        reply = """الأوامر المتاحة:
+
+/بداية - إعادة تهيئة البوت واختيار الاسم والشخصية
+/اسم [الاسم الجديد] - تغيير اسمي
+/شخصية [صديقة/حبيبة] - تغيير شخصيتي
+/حالة - معلومات عن إعداداتك الحالية
+/مساعدة - عرض هذه القائمة
+
+مثال: /اسم نورة
+مثال: /شخصية صديقة"""
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+    
+    # Check user status command
+    if user_message.lower() in ["/حالة", "حالتي"]:
+        personality_name = "صديقة" if personality_type == "صديقة" else "حبيبة"
+        reply = f"""إعداداتك الحالية:
+
+الاسم: {bot_name}
+الشخصية: {personality_name}
+عدد رسائلك: {user['message_count']}
+
+لتغيير الإعدادات:
+/اسم [اسم جديد]
+/شخصية [صديقة أو حبيبة]"""
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+    
+    # Change name command
+    if user_message.lower().startswith("/اسم "):
+        new_name = user_message[5:].strip()[:30]
+        if len(new_name) < 2:
+            reply = "الاسم لازم يكون أطول من حرفين"
+        else:
+            update_user(user_id, bot_name=new_name)
+            title = get_random_title(personality_type)
+            reply = f"تمام {title}، من الحين اسمي {new_name}"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+    
+    # Change personality command
+    if user_message.lower().startswith("/شخصية "):
+        choice = user_message[8:].strip()
+        if "صديق" in choice:
+            update_user(user_id, personality_type="صديقة")
+            reply = "تمام، من الحين أنا صديقتك"
+        elif "حبيب" in choice:
+            update_user(user_id, personality_type="حبيبة")
+            reply = "تمام، من الحين أنا حبيبتك"
+        else:
+            reply = "اختار: صديقة أو حبيبة\nمثال: /شخصية صديقة"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+    
     # Handle initial setup
-    if user_message.lower() in ["بداية", "start", "/start", "مرحبا", "السلام عليكم"]:
-        reply = f"هلا 💙\nقبل ما نبدأ:\n\n1️⃣ وش تبيني أكون لك؟\n   - صديقة\n   - حبيبة\n\nاكتب اختيارك"
+    if user_message.lower() in ["بداية", "start", "/start", "/بداية"] or step == 1:
+        reply = """مرحباً، أنا بوت
+
+قبل ما نبدأ، حدد لي شغلتين:
+
+1. وش تبيني أكون لك؟
+   - صديقة
+   - حبيبة
+
+2. وش تحب تسميني؟
+
+اكتب اختيارك للشخصية أولاً (صديقة أو حبيبة)"""
         update_user(user_id, step=2)
         
     elif step == 2:
         choice = user_message.strip()
         if "صديق" in choice:
             update_user(user_id, personality_type="صديقة", step=3)
-            reply = f"تمام! راح أكون صديقتك 💙\nوش تحب تسميني؟"
+            reply = "تمام، راح أكون صديقتك\nالحين وش تحب تسميني؟"
         elif "حبيب" in choice:
             update_user(user_id, personality_type="حبيبة", step=3)
-            reply = f"حلو! راح أكون حبيبتك 💙\nوش تحب تسميني؟"
+            reply = "تمام، راح أكون حبيبتك\nالحين وش تحب تسميني؟"
         else:
             reply = "اختار:\n- صديقة\n- حبيبة"
             
@@ -456,7 +522,7 @@ def handle_message(event):
             personality_type = user['personality_type'] or 'حبيبة'
             update_user(user_id, bot_name=chosen_name, step=4)
             title = get_random_title(personality_type)
-            reply = f"تمام {title}! من اليوم أنا {chosen_name} 💙\nكيف حالك؟"
+            reply = f"تمام {title}، من اليوم أنا {chosen_name}\nكيف حالك؟"
             
     # Regular conversation
     else:
@@ -496,9 +562,9 @@ def home():
             <meta charset="UTF-8">
         </head>
         <body style='font-family: Arial; text-align: center; padding: 50px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;'>
-            <h1>💙 LoveBot Pro</h1>
+            <h1>LoveBot Pro</h1>
             <p>نظام ذكي للدعم العاطفي والنفسي</p>
-            <p style='font-size: 0.9em; opacity: 0.8;'>✅ نظام تبديل تلقائي للمفاتيح | 🧠 محادثات ذكية | 💾 ذاكرة محسّنة</p>
+            <p style='font-size: 0.9em; opacity: 0.8;'>نظام تبديل تلقائي للمفاتيح | محادثات ذكية | ذاكرة محسّنة</p>
         </body>
     </html>
     """, 200
@@ -565,10 +631,10 @@ if __name__ == "__main__":
     debug = os.getenv("DEBUG", "False").lower() == "true"
     
     logger.info("=" * 60)
-    logger.info("🚀 LoveBot Pro - Advanced Version")
-    logger.info(f"📝 Port: {port}")
-    logger.info(f"🔧 Debug: {debug}")
-    logger.info(f"🔑 API Keys loaded: {len(GEMINI_KEYS)}")
+    logger.info("LoveBot Pro - Advanced Version")
+    logger.info(f"Port: {port}")
+    logger.info(f"Debug: {debug}")
+    logger.info(f"API Keys loaded: {len(GEMINI_KEYS)}")
     logger.info("=" * 60)
     
     app.run(host="0.0.0.0", port=port, debug=debug)
