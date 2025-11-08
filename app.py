@@ -23,16 +23,22 @@ app = Flask(__name__)
 
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, GEMINI_API_KEY]):
+# ================== Gemini API Keys ==================
+GEMINI_KEYS = [
+    os.getenv("GEMINI_API_KEY_1"),
+    os.getenv("GEMINI_API_KEY_2"),
+    os.getenv("GEMINI_API_KEY_3")
+]
+current_key_index = 0
+# =====================================================
+
+if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET]) or not any(GEMINI_KEYS):
     raise ValueError("❌ Missing required environment variables")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.0-flash-exp")
 generation_config = {
     "temperature": 0.8,
     "top_p": 0.95,
@@ -41,6 +47,16 @@ generation_config = {
 }
 
 DB_PATH = "lovebot.db"
+
+# ---------------- Database ----------------
+@contextmanager
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 def init_db():
     with get_db_connection() as conn:
@@ -65,15 +81,6 @@ def init_db():
         c.execute('''CREATE INDEX IF NOT EXISTS idx_timestamp ON conversations(timestamp)''')
         conn.commit()
         logger.info("✅ Database initialized successfully")
-
-@contextmanager
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-    finally:
-        conn.close()
 
 def get_user(user_id):
     try:
@@ -151,8 +158,29 @@ def get_conversation_history(user_id, limit=3):
         logger.error(f"Database error in get_conversation_history: {e}")
         return []
 
-USER_TITLES = ["حبيبي", "قلبي", "يا روحي", "جنتي", "يا بعد عمري", "دنيتي", "عمري"]
+# ---------------- Gemini API Handling ----------------
+def get_gemini_model():
+    global current_key_index
+    max_attempts = len(GEMINI_KEYS)
+    for _ in range(max_attempts):
+        key = GEMINI_KEYS[current_key_index]
+        if not key:
+            current_key_index = (current_key_index + 1) % len(GEMINI_KEYS)
+            continue
+        try:
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel("gemini-2.0-flash-exp")
+            return model
+        except Exception as e:
+            if "Quota exceeded" in str(e) or "Invalid API key" in str(e):
+                current_key_index = (current_key_index + 1) % len(GEMINI_KEYS)
+                continue
+            else:
+                logger.error(f"Gemini unexpected error: {e}")
+                return None
+    return None
 
+USER_TITLES = ["حبيبي", "قلبي", "يا روحي", "جنتي", "يا بعد عمري", "دنيتي", "عمري"]
 def get_random_title():
     return random.choice(USER_TITLES)
 
@@ -176,7 +204,11 @@ def remove_emojis(text):
     return emoji_pattern.sub(r'', text)
 
 def generate_ai_response(user_message, bot_name="وتين", user_id=None):
+    model = get_gemini_model()
     title = get_random_title()
+    if not model:
+        return f"{title}، جميع مفاتيح Gemini اليوم انتهى لها الحد. حاول لاحقاً."
+
     context = ""
     if user_id:
         history = get_conversation_history(user_id, limit=3)
@@ -214,6 +246,7 @@ def generate_ai_response(user_message, bot_name="وتين", user_id=None):
         logger.error(f"Gemini API error: {e}")
         return f"{title}، انشغلت ما اقدر ارد عليك، خلينا نكمل المحادثة بكرة إن شاء الله."
 
+# ---------------- LINE Bot ----------------
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
