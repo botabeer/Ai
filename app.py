@@ -433,22 +433,22 @@ def handle_message(event):
     step = user['step']
     
     # Handle commands
-    if user_message.lower() in ["مساعدة", "help", "/help", "الأوامر"]:
+    if user_message.lower() in ["مساعدة", "help", "الأوامر"]:
         reply = """الأوامر المتاحة:
 
-/بداية - إعادة تهيئة البوت واختيار الاسم والشخصية
-/اسم [الاسم الجديد] - تغيير اسمي
-/شخصية [صديقة/حبيبة] - تغيير شخصيتي
-/حالة - معلومات عن إعداداتك الحالية
-/مساعدة - عرض هذه القائمة
+بداية - إعادة تهيئة البوت واختيار الاسم والشخصية
+اسم [الاسم الجديد] - تغيير اسمي
+شخصية [صديقة/حبيبة] - تغيير شخصيتي
+حالة - معلومات عن إعداداتك الحالية
+مساعدة - عرض هذه القائمة
 
-مثال: /اسم نورة
-مثال: /شخصية صديقة"""
+مثال: اسم نورة
+مثال: شخصية صديقة"""
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
     
     # Check user status command
-    if user_message.lower() in ["/حالة", "حالتي"]:
+    if user_message.lower() in ["حالة", "حالتي"]:
         personality_name = "صديقة" if personality_type == "صديقة" else "حبيبة"
         reply = f"""إعداداتك الحالية:
 
@@ -457,14 +457,14 @@ def handle_message(event):
 عدد رسائلك: {user['message_count']}
 
 لتغيير الإعدادات:
-/اسم [اسم جديد]
-/شخصية [صديقة أو حبيبة]"""
+اسم [اسم جديد]
+شخصية [صديقة أو حبيبة]"""
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
     
     # Change name command
-    if user_message.lower().startswith("/اسم "):
-        new_name = user_message[5:].strip()[:30]
+    if user_message.lower().startswith("اسم "):
+        new_name = user_message[4:].strip()[:30]
         if len(new_name) < 2:
             reply = "الاسم لازم يكون أطول من حرفين"
         else:
@@ -475,8 +475,8 @@ def handle_message(event):
         return
     
     # Change personality command
-    if user_message.lower().startswith("/شخصية "):
-        choice = user_message[8:].strip()
+    if user_message.lower().startswith("شخصية "):
+        choice = user_message[6:].strip()
         if "صديق" in choice:
             update_user(user_id, personality_type="صديقة")
             reply = "تمام، من الحين أنا صديقتك"
@@ -484,22 +484,18 @@ def handle_message(event):
             update_user(user_id, personality_type="حبيبة")
             reply = "تمام، من الحين أنا حبيبتك"
         else:
-            reply = "اختار: صديقة أو حبيبة\nمثال: /شخصية صديقة"
+            reply = "اختار: صديقة أو حبيبة\nمثال: شخصية صديقة"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
     
     # Handle initial setup
-    if user_message.lower() in ["بداية", "start", "/start", "/بداية"] or step == 1:
-        reply = """مرحباً، أنا بوت
-
+    if user_message.lower() in ["بداية", "start"] or step == 1:
+        reply = """مرحباً، أنا بوت 
 قبل ما نبدأ، حدد لي شغلتين:
-
 1. وش تبيني أكون لك؟
    - صديقة
    - حبيبة
-
 2. وش تحب تسميني؟
-
 اكتب اختيارك للشخصية أولاً (صديقة أو حبيبة)"""
         update_user(user_id, step=2)
         
