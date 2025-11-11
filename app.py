@@ -7,7 +7,6 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
 import random
 import logging
-import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -38,7 +37,6 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id TEXT PRIMARY KEY,
         bot_name TEXT,
-        user_nickname TEXT,
         backstory_index INTEGER,
         relationship_stage TEXT DEFAULT 'initial',
         last_interaction TEXT,
@@ -71,7 +69,7 @@ def get_user(user_id):
 def create_user(user_id):
     bot_names = ["نور", "روان", "ريم", "لمى", "مها", "العنود", "نوف"]
     bot_name = random.choice(bot_names)
-    backstory_index = 0  # نفس القصة لكل المستخدمين
+    backstory_index = 0
     now = datetime.now().isoformat()
     try:
         conn = get_db_connection()
@@ -133,86 +131,66 @@ def get_conversation_history(user_id, limit=5):
         logger.error(f"Database error in get_conversation_history: {e}")
         return []
 
-# ===================== محادثة الحب السري =====================
-BACKSTORY = {
-    "scenario": "كنت معاكو في القروب من زمان، وكنا نحب بعض سرًا.",
-    "goal": "أنا معجبة سرية ودّي أتعرف عليك أكثر"
-}
+# ===================== الردود تدريجياً =====================
+def first_message(bot_name):
+    return "هلا، كيفك؟"
 
-# اللهجات المتنوعة
-def get_random_dialect():
-    dialects = ["نجدي", "جده", "كويتي"]
-    return random.choice(dialects)
+def second_message(bot_name):
+    return "تذكرني؟ كنت معاك في القروب من زمان."
 
-def format_first_message(bot_name, dialect):
-    if dialect == "نجدي":
-        return f"هلا أنا {bot_name}، كنت معاك في القروب من زمان. وترا كنت أحبك من يومها. ودي أتعرف عليك أكثر، تذكرني؟"
-    elif dialect == "جده":
-        return f"يا هلا، أنا {bot_name}. كنا مع بعض في القروب من زمان، ودايم كنت أفكر فيك. ودي نتعرف أكثر، تتذكرني؟"
-    elif dialect == "كويتي":
-        return f"هلا حبي، أنا {bot_name}. كنت بالقروب وياك من زمان، ومن يومها وأنا أفكر فيك. ودي أتعرف عليك بعد، تذكرني؟"
+def next_message(part):
+    story_parts = [
+        "من يومها وأنا أفكر فيك كثير.",
+        "كنت أحبك وما قلت لك.",
+        "ودي أتعرف عليك أكثر وأقرب لك.",
+        "كانت أيام حلوة بالقروب، تذكرها؟"
+    ]
+    if part < len(story_parts):
+        return story_parts[part]
+    return "ودي نتعرف أكثر."
+
+def generate_bot_reply(user_id, user_msg, user_data):
+    count = user_data['message_count']
+
+    if count == 0:
+        reply = first_message(user_data['bot_name'])
+    elif count == 1:
+        reply = second_message(user_data['bot_name'])
     else:
-        return f"هلا، أنا {bot_name}. كنت معاك في القروب من زمان. ودي أتعرف عليك أكثر، تذكرني؟"
+        reply = next_message(count - 2)
 
-def generate_bot_reply(user_msg, bot_name, relationship_stage, user_id):
-    # الردود بسيطة واقعية حسب مرحلة العلاقة
-    stage_behavior = {
-        "initial": ["شلونك؟", "كيف أمورك؟", "تذكرني؟"],
-        "recognized": ["الحمدلله تذكرتني!", "وش الأخبار؟", "ضحكتني والله"],
-        "comfortable": ["وش مسوي اليوم؟", "ترا مشتاقه لك", "صدق، يومنا حلو"],
-        "interested": ["ودي نتقابل؟", "ترا يهمني أمرنا", "تحب نكمل الحديث؟"]
-    }
-    replies = stage_behavior.get(relationship_stage, stage_behavior["initial"])
-    reply = random.choice(replies)
     return reply
 
-# ===================== LINE Bot Handlers =====================
+# ===================== LINE Bot Handler =====================
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
-    user_message = event.message.text.strip()
+    user_msg = event.message.text.strip()
 
-    if len(user_message) > 3000:
+    if len(user_msg) > 3000:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="رسالتك طويلة شوي، اختصرها"))
         return
 
-    user = get_user(user_id)
-    if not user:
-        bot_name = create_user(user_id)
-        user = get_user(user_id)
-        if not user:
+    user_data = get_user(user_id)
+    if not user_data:
+        create_user(user_id)
+        user_data = get_user(user_id)
+        if not user_data:
             logger.error(f"Failed to create user: {user_id}")
             return
-    else:
-        bot_name = user['bot_name']
 
-    dialect = get_random_dialect()
-    relationship_stage = user['relationship_stage'] or "initial"
+    reply = generate_bot_reply(user_id, user_msg, user_data)
+    save_conversation(user_id, user_msg, reply)
 
-    if user['message_count'] == 0:
-        # أول رسالة
-        reply = format_first_message(bot_name, dialect)
-        update_user(user_id, message_count=1, last_interaction=datetime.now().isoformat())
-    else:
-        # الردود العادية
-        reply = generate_bot_reply(user_message, bot_name, relationship_stage, user_id)
-        save_conversation(user_id, user_message, reply)
-        new_count = user['message_count'] + 1
-        # تطور العلاقة تلقائي
-        if new_count > 3 and relationship_stage == "initial":
-            relationship_stage = "recognized"
-        elif new_count > 7 and relationship_stage == "recognized":
-            relationship_stage = "comfortable"
-        elif new_count > 12 and relationship_stage == "comfortable":
-            relationship_stage = "interested"
-
-        update_user(user_id, message_count=new_count, relationship_stage=relationship_stage, last_interaction=datetime.now().isoformat())
+    new_count = user_data['message_count'] + 1
+    update_user(user_id, message_count=new_count, last_interaction=datetime.now().isoformat())
 
     try:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
     except LineBotApiError as e:
         logger.error(f"LINE API error: {e}")
 
+# ===================== Flask Routes =====================
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature")
@@ -231,7 +209,7 @@ def callback():
 
 @app.route("/", methods=["GET"])
 def home():
-    return "<h1>Prank Bot</h1><p>بوت الحب السري من القروب القديم</p>", 200
+    return "<h1>Prank Bot</h1><p>الحب السري من القروب القديم بشكل تدريجي باللهجة النجدية</p>", 200
 
 if __name__ == "__main__":
     init_db()
