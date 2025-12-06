@@ -56,7 +56,7 @@ RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", "2"))
 
 # Bot Info
 BOT_NAME = "Smart Assistant"
-BOT_VERSION = "2.0"
+BOT_VERSION = "2.1"
 BOT_CREATOR = "عبير الدوسري"
 BOT_YEAR = "2025"
 
@@ -69,6 +69,9 @@ if not GEMINI_KEYS:
 # LINE v3 Setup
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# Database
+DB_PATH = "chatbot.db"
 
 # Rate Limiter
 class RateLimiter:
@@ -97,7 +100,6 @@ rate_limiter = RateLimiter()
 class SmartKeyManager:
     def __init__(self, keys):
         self.keys = keys
-        self.index = 0
         self.stats = {
             k: {
                 'fails': 0, 
@@ -162,60 +164,6 @@ class SmartKeyManager:
 
 key_manager = SmartKeyManager(GEMINI_KEYS)
 
-# Database
-DB_PATH = "chatbot.db"
-
-def init_db():
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS users (
-            user_id TEXT PRIMARY KEY,
-            name TEXT,
-            first_seen TEXT,
-            last_seen TEXT,
-            msg_count INTEGER DEFAULT 0,
-            daily_count INTEGER DEFAULT 0,
-            daily_reset TEXT,
-            is_blocked INTEGER DEFAULT 0,
-            language TEXT DEFAULT 'ar'
-        )''')
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS chats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT,
-            role TEXT,
-            content TEXT,
-            tokens INTEGER DEFAULT 0,
-            timestamp TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(user_id)
-        )''')
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS analytics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_type TEXT,
-            user_id TEXT,
-            data TEXT,
-            timestamp TEXT
-        )''')
-        
-        c.execute('CREATE INDEX IF NOT EXISTS idx_user ON chats(user_id)')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_time ON chats(timestamp)')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_analytics ON analytics(user_id, timestamp)')
-        
-        conn.commit()
-        conn.close()
-        logger.info("Database initialized successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
-        raise
-
-# Initialize database immediately when module loads
-logger.info("Initializing database on module load...")
-init_db()
-logger.info("Database ready")
-
 # Gemini Config
 GEN_CONFIG = {
     "temperature": 0.8,
@@ -231,9 +179,7 @@ SAFETY = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
 
-# Database
-DB_PATH = "chatbot.db"
-
+# Database Functions
 def init_db():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -280,13 +226,18 @@ def init_db():
         logger.error(f"Failed to initialize database: {e}")
         raise
 
+# Initialize database
+logger.info("Initializing database...")
+init_db()
+logger.info("Database ready")
+
 def log_event(event_type, user_id=None, data=None):
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute(
             "INSERT INTO analytics (event_type, user_id, data, timestamp) VALUES (?, ?, ?, ?)",
-            (event_type, user_id, str(data), datetime.now().isoformat())
+            (event_type, user_id, str(data) if data else None, datetime.now().isoformat())
         )
         conn.commit()
         conn.close()
@@ -294,42 +245,49 @@ def log_event(event_type, user_id=None, data=None):
         logger.error(f"Failed to log event: {e}")
 
 def get_user(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    user = c.fetchone()
-    conn.close()
-    return user
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+        user = c.fetchone()
+        conn.close()
+        return user
+    except Exception as e:
+        logger.error(f"Failed to get user: {e}")
+        return None
 
 def save_user(user_id, name=None):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    now = datetime.now().isoformat()
-    today = datetime.now().date().isoformat()
-    
-    user = get_user(user_id)
-    if user:
-        daily_reset = user['daily_reset'] or today
-        if daily_reset != today:
-            c.execute(
-                "UPDATE users SET last_seen=?, msg_count=msg_count+1, daily_count=1, daily_reset=? WHERE user_id=?",
-                (now, today, user_id)
-            )
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        now = datetime.now().isoformat()
+        today = datetime.now().date().isoformat()
+        
+        user = get_user(user_id)
+        if user:
+            daily_reset = user['daily_reset'] or today
+            if daily_reset != today:
+                c.execute(
+                    "UPDATE users SET last_seen=?, msg_count=msg_count+1, daily_count=1, daily_reset=? WHERE user_id=?",
+                    (now, today, user_id)
+                )
+            else:
+                c.execute(
+                    "UPDATE users SET last_seen=?, msg_count=msg_count+1, daily_count=daily_count+1 WHERE user_id=?",
+                    (now, user_id)
+                )
         else:
             c.execute(
-                "UPDATE users SET last_seen=?, msg_count=msg_count+1, daily_count=daily_count+1 WHERE user_id=?",
-                (now, user_id)
+                "INSERT INTO users (user_id, name, first_seen, last_seen, msg_count, daily_count, daily_reset) VALUES (?, ?, ?, ?, 1, 1, ?)",
+                (user_id, name, now, now, today)
             )
-    else:
-        c.execute(
-            "INSERT INTO users (user_id, name, first_seen, last_seen, msg_count, daily_count, daily_reset) VALUES (?, ?, ?, ?, 1, 1, ?)",
-            (user_id, name, now, now, today)
-        )
-        log_event('new_user', user_id)
-    
-    conn.commit()
-    conn.close()
+            log_event('new_user', user_id)
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to save user: {e}")
 
 def check_daily_limit(user_id):
     user = get_user(user_id)
@@ -343,32 +301,39 @@ def check_daily_limit(user_id):
     return user['daily_count'] < MAX_DAILY_MESSAGES
 
 def save_chat(user_id, role, content, tokens=0):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO chats (user_id, role, content, tokens, timestamp) VALUES (?, ?, ?, ?, ?)",
-        (user_id, role, content, tokens, datetime.now().isoformat())
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO chats (user_id, role, content, tokens, timestamp) VALUES (?, ?, ?, ?, ?)",
+            (user_id, role, content, tokens, datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to save chat: {e}")
 
 def get_history(user_id, limit=8):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    
-    cutoff = (datetime.now() - timedelta(hours=48)).isoformat()
-    c.execute("DELETE FROM chats WHERE user_id=? AND timestamp < ?", (user_id, cutoff))
-    
-    c.execute(
-        "SELECT role, content FROM chats WHERE user_id=? ORDER BY timestamp DESC LIMIT ?",
-        (user_id, limit)
-    )
-    rows = c.fetchall()
-    conn.commit()
-    conn.close()
-    
-    return list(reversed(rows))
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        
+        cutoff = (datetime.now() - timedelta(hours=48)).isoformat()
+        c.execute("DELETE FROM chats WHERE user_id=? AND timestamp < ?", (user_id, cutoff))
+        
+        c.execute(
+            "SELECT role, content FROM chats WHERE user_id=? ORDER BY timestamp DESC LIMIT ?",
+            (user_id, limit)
+        )
+        rows = c.fetchall()
+        conn.commit()
+        conn.close()
+        
+        return list(reversed(rows))
+    except Exception as e:
+        logger.error(f"Failed to get history: {e}")
+        return []
 
 def clean_old_data():
     try:
@@ -389,17 +354,7 @@ def clean_old_data():
 
 # Text Processing
 def clean_text(text):
-    emoji_pattern = re.compile(
-        "["
-        "\U0001F600-\U0001F64F"
-        "\U0001F300-\U0001F5FF"
-        "\U0001F680-\U0001F6FF"
-        "\U0001F1E0-\U0001F1FF"
-        "\U00002702-\U000027B0"
-        "\U000024C2-\U0001F251"
-        "]+", flags=re.UNICODE
-    )
-    text = emoji_pattern.sub('', text).strip()
+    text = text.strip()
     text = re.sub(r'\s+', ' ', text)
     return text
 
@@ -412,7 +367,7 @@ def detect_language(text):
     return 'en'
 
 def estimate_tokens(text):
-    return len(text.split()) * 1.3
+    return int(len(text.split()) * 1.3)
 
 # Commands
 def get_help_message():
@@ -420,37 +375,37 @@ def get_help_message():
 
 الأوامر الأساسية:
 
-• مساعدة أو help - عرض هذه الرسالة
-• إعادة أو مسح - مسح المحادثة والبدء من جديد
-• معرفي أو ايديي - عرض معرف حسابك
-• إحصائياتي أو حسابي - عرض إحصائياتك
-• معلومات أو عن البوت - معلومات عن البوت
+- مساعدة أو help - عرض هذه الرسالة
+- إعادة أو مسح - مسح المحادثة والبدء من جديد
+- معرفي أو ايديي - عرض معرف حسابك
+- إحصائياتي أو حسابي - عرض إحصائياتك
+- معلومات أو عن البوت - معلومات عن البوت
 
 القواعد:
 1. اكتب بشكل طبيعي
-2. كن واضحاً في سؤالك
+2. كن واضحا في سؤالك
 3. انتظر {RATE_LIMIT_SECONDS} ثانية بين الرسائل
 4. استخدم "إعادة" عند تغيير الموضوع
 
 الحدود اليومية:
-• {MAX_DAILY_MESSAGES} رسالة يومياً
-• {RATE_LIMIT_SECONDS} ثانية بين الرسائل
+- {MAX_DAILY_MESSAGES} رسالة يوميا
+- {RATE_LIMIT_SECONDS} ثانية بين الرسائل
 
 {BOT_YEAR} - تم الإنشاء بواسطة {BOT_CREATOR}"""
 
 def get_welcome_message():
-    return f"""مرحباً بك
+    return f"""مرحبا بك
 
 أنا {BOT_NAME} - مساعدك الذكي
 
 ماذا أستطيع أن أفعل؟
-• الإجابة على أسئلتك
-• النقاش في أي موضوع
-• تقديم النصائح والمعلومات
-• مساعدتك في حل المشاكل
+- الإجابة على أسئلتك
+- النقاش في أي موضوع
+- تقديم النصائح والمعلومات
+- مساعدتك في حل المشاكل
 
 ابدأ المحادثة:
-اكتب أي شيء وسأساعدك فوراً
+اكتب أي شيء وسأساعدك فورا
 
 للمساعدة: اكتب /help أو مساعدة
 
@@ -465,19 +420,19 @@ def get_bot_info():
 السنة: {BOT_YEAR}
 
 المواصفات:
-• يدعم اللغة العربية والإنجليزية
-• ذاكرة محادثة ذكية (48 ساعة)
-• نظام حماية متقدم
-• {len(GEMINI_KEYS)} مفاتيح API للأداء العالي
+- يدعم اللغة العربية والإنجليزية
+- ذاكرة محادثة ذكية (48 ساعة)
+- نظام حماية متقدم
+- {len(GEMINI_KEYS)} مفاتيح API للأداء العالي
 
 الحدود:
-• {MAX_DAILY_MESSAGES} رسالة يومياً
-• {RATE_LIMIT_SECONDS} ثانية بين الرسائل
+- {MAX_DAILY_MESSAGES} رسالة يوميا
+- {RATE_LIMIT_SECONDS} ثانية بين الرسائل
 
 التقنيات:
-• LINE Bot SDK v3
-• Google Gemini 2.0 AI
-• Python + Flask
+- LINE Bot SDK v3
+- Google Gemini 2.0 AI
+- Python + Flask
 
 {BOT_YEAR} - جميع الحقوق محفوظة
 تم الإنشاء بواسطة {BOT_CREATOR}"""
@@ -485,7 +440,7 @@ def get_bot_info():
 def get_user_stats(user_id):
     user = get_user(user_id)
     if not user:
-        return "لم أجد بياناتك. جرب إرسال رسالة أولاً."
+        return "لم أجد بياناتك. جرب إرسال رسالة أولا."
     
     first_seen = datetime.fromisoformat(user['first_seen'])
     days_active = (datetime.now() - first_seen).days
@@ -499,14 +454,14 @@ def get_user_stats(user_id):
 {user_id}
 
 الاستخدام:
-• إجمالي الرسائل: {user['msg_count']}
-• رسائل اليوم: {today_count}/{MAX_DAILY_MESSAGES}
-• متبقي اليوم: {remaining} رسالة
+- إجمالي الرسائل: {user['msg_count']}
+- رسائل اليوم: {today_count}/{MAX_DAILY_MESSAGES}
+- متبقي اليوم: {remaining} رسالة
 
 النشاط:
-• أول استخدام: {first_seen.strftime('%Y-%m-%d')}
-• آخر نشاط: {datetime.fromisoformat(user['last_seen']).strftime('%Y-%m-%d %H:%M')}
-• عدد الأيام: {days_active} يوم
+- أول استخدام: {first_seen.strftime('%Y-%m-%d')}
+- آخر نشاط: {datetime.fromisoformat(user['last_seen']).strftime('%Y-%m-%d %H:%M')}
+- عدد الأيام: {days_active} يوم
 
 اللغة المفضلة: {'العربية' if user['language'] == 'ar' else 'English'}
 
@@ -522,7 +477,8 @@ def generate_response(user_msg, user_id):
         context = "\n## السياق السابق:\n"
         for msg in history[-6:]:
             role = "المستخدم" if msg['role'] == 'user' else "أنت"
-            context += f"{role}: {msg['content'][:200]}\n"
+            content = msg['content'][:200] if len(msg['content']) > 200 else msg['content']
+            context += f"{role}: {content}\n"
     
     # Check for commands
     msg_lower = user_msg.lower().strip()
@@ -533,11 +489,14 @@ def generate_response(user_msg, user_id):
     
     # Reset commands
     if msg_lower in ['reset', 'إعادة', 'مسح', 'ابدأ من جديد', 'حذف المحادثة', 'اعادة', 'مسح المحادثة', 'ابدا من جديد', 'بداية جديدة']:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("DELETE FROM chats WHERE user_id=?", (user_id,))
-        conn.commit()
-        conn.close()
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("DELETE FROM chats WHERE user_id=?", (user_id,))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Failed to reset chat: {e}")
         return "تم مسح المحادثة بنجاح\nلنبدأ محادثة جديدة"
     
     # ID commands
@@ -566,16 +525,15 @@ def generate_response(user_msg, user_id):
 - ذكي ومحترف
 - واضح ومباشر
 - ودود لكن احترافي
-- مختصر وفعّال
+- مختصر وفعال
 
 ## قواعد الرد:
-- كن مختصراً جداً (1-3 جمل للأسئلة البسيطة)
+- كن مختصرا جدا (1-3 جمل للأسئلة البسيطة)
 - للمواضيع المعقدة: استخدم نقاط أو فقرات قصيرة
-- لا تستخدم إيموجي إلا نادراً
 - استخدم لغة طبيعية وبسيطة
 - ركز على الإجابة المفيدة
 - تجنب التكرار
-- كن دقيقاً
+- كن دقيقا
 - اعترف إذا لم تعرف"""
     else:
         system_prompt = """You are a smart, professional AI assistant similar to ChatGPT.
@@ -589,7 +547,6 @@ def generate_response(user_msg, user_id):
 ## Response rules:
 - Be very brief (1-3 sentences for simple questions)
 - For complex topics: use bullet points
-- Rarely use emojis
 - Use natural language
 - Focus on useful answers
 - Avoid repetition
@@ -621,14 +578,10 @@ def generate_response(user_msg, user_id):
             logger.info(f"Sending request to Gemini for user {user_id}")
             response = model.generate_content(prompt, request_options={"timeout": 30})
             
-            if not response:
-                raise ValueError("No response from API")
-            
-            if not hasattr(response, 'text') or not response.text:
-                # Check if blocked
+            if not response or not hasattr(response, 'text') or not response.text:
                 if hasattr(response, 'prompt_feedback'):
                     logger.warning(f"Response blocked: {response.prompt_feedback}")
-                raise ValueError("Empty response text")
+                raise ValueError("Empty response from API")
             
             reply = clean_text(response.text.strip())
             logger.info(f"Got response: {len(reply)} chars")
@@ -649,15 +602,15 @@ def generate_response(user_msg, user_id):
             
         except Exception as e:
             last_error = str(e)
-            error = str(e).lower()
-            logger.error(f"Attempt {attempt + 1} failed: {e}", exc_info=True)
+            error_lower = str(e).lower()
+            logger.error(f"Attempt {attempt + 1} failed: {e}")
             
-            is_quota = "quota" in error or "resource" in error or "429" in error
+            is_quota = "quota" in error_lower or "resource" in error_lower or "429" in error_lower
             key_manager.mark_fail(current_key, is_quota)
             
-            if "safety" in error or "block" in error:
+            if "safety" in error_lower or "block" in error_lower:
                 log_event('safety_block', user_id)
-                return "عذراً، لا أستطيع الرد على هذا الموضوع. دعنا نتحدث عن شيء آخر."
+                return "عذرا، لا أستطيع الرد على هذا الموضوع. دعنا نتحدث عن شيء آخر."
             
             if attempt < len(GEMINI_KEYS) * 2 - 1:
                 logger.info(f"Retrying with different key...")
@@ -667,13 +620,12 @@ def generate_response(user_msg, user_id):
     logger.error(f"All attempts failed. Last error: {last_error}")
     log_event('generation_failed', user_id, {'error': last_error})
     
-    # Return more helpful error message
     if "quota" in str(last_error).lower():
-        return "عذراً، وصلنا للحد الأقصى من الطلبات. حاول مرة أخرى بعد دقيقة."
+        return "عذرا، وصلنا للحد الأقصى من الطلبات. حاول مرة أخرى بعد دقيقة."
     elif "timeout" in str(last_error).lower():
-        return "عذراً، استغرق الطلب وقتاً طويلاً. حاول مرة أخرى."
+        return "عذرا، استغرق الطلب وقتا طويلا. حاول مرة أخرى."
     else:
-        return f"عذراً، حدث خطأ تقني. حاول مرة أخرى بعد قليل.\n\nللدعم: أرسل 'معرفي' وأبلغ المطور"
+        return f"عذرا، حدث خطأ تقني. حاول مرة أخرى بعد قليل.\n\nللدعم: أرسل 'معرفي' وأبلغ المطور"
 
 # LINE Handlers
 def send_loading_animation(user_id):
@@ -726,7 +678,7 @@ def handle_text_message(event):
         return
     
     if len(user_msg) > 3000:
-        reply = f"""الرسالة طويلة جداً
+        reply = f"""الرسالة طويلة جدا
 
 الحد الأقصى: 3000 حرف
 رسالتك: {len(user_msg)} حرف
@@ -755,7 +707,7 @@ def handle_text_message(event):
         reply = f"""وصلت للحد اليومي
 
 الحد الأقصى: {MAX_DAILY_MESSAGES} رسالة/يوم
-يمكنك المتابعة غداً
+يمكنك المتابعة غدا
 
 {BOT_YEAR} - {BOT_CREATOR}"""
         try:
@@ -798,14 +750,13 @@ def handle_text_message(event):
         logger.error(f"Failed to handle message from {user_id}: {e}", exc_info=True)
         log_event('send_failed', user_id, {'error': str(e)})
         
-        # Try to send error message
         try:
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
                 line_bot_api.reply_message(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[TextMessage(text="عذراً، حدث خطأ. حاول مرة أخرى.")]
+                        messages=[TextMessage(text="عذرا، حدث خطأ. حاول مرة أخرى.")]
                     )
                 )
         except:
@@ -824,44 +775,51 @@ def require_admin(f):
 @app.route("/admin/stats")
 @require_admin
 def admin_stats():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    
-    c.execute("SELECT COUNT(*) as total FROM users")
-    total_users = c.fetchone()['total']
-    
-    c.execute("SELECT COUNT(*) as active FROM users WHERE last_seen > ?", 
-              [(datetime.now() - timedelta(days=1)).isoformat()])
-    active_24h = c.fetchone()['active']
-    
-    c.execute("SELECT COUNT(*) as total FROM chats")
-    total_messages = c.fetchone()['total']
-    
-    c.execute("SELECT COUNT(*) as today FROM chats WHERE timestamp > ?",
-              [datetime.now().date().isoformat()])
-    messages_today = c.fetchone()['today']
-    
-    conn.close()
-    
-    return jsonify({
-        "users": {"total": total_users, "active_24h": active_24h},
-        "messages": {"total": total_messages, "today": messages_today},
-        "api_keys": key_manager.get_stats(),
-        "creator": BOT_CREATOR,
-        "year": BOT_YEAR
-    })
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        
+        c.execute("SELECT COUNT(*) as total FROM users")
+        total_users = c.fetchone()['total']
+        
+        c.execute("SELECT COUNT(*) as active FROM users WHERE last_seen > ?", 
+                  [(datetime.now() - timedelta(days=1)).isoformat()])
+        active_24h = c.fetchone()['active']
+        
+        c.execute("SELECT COUNT(*) as total FROM chats")
+        total_messages = c.fetchone()['total']
+        
+        c.execute("SELECT COUNT(*) as today FROM chats WHERE timestamp > ?",
+                  [datetime.now().date().isoformat()])
+        messages_today = c.fetchone()['today']
+        
+        conn.close()
+        
+        return jsonify({
+            "users": {"total": total_users, "active_24h": active_24h},
+            "messages": {"total": total_messages, "today": messages_today},
+            "api_keys": key_manager.get_stats(),
+            "creator": BOT_CREATOR,
+            "year": BOT_YEAR
+        })
+    except Exception as e:
+        logger.error(f"Admin stats error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/admin/clean")
 @require_admin
 def admin_clean():
-    clean_old_data()
-    return jsonify({"status": "cleaned"})
+    try:
+        clean_old_data()
+        return jsonify({"status": "cleaned"})
+    except Exception as e:
+        logger.error(f"Admin clean error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/admin/test-keys")
 @require_admin
 def test_keys():
-    """Test all Gemini API keys"""
     results = {}
     for i, key in enumerate(GEMINI_KEYS):
         try:
@@ -894,7 +852,7 @@ def callback():
         logger.error("Invalid signature")
         abort(400)
     except Exception as e:
-        logger.error(f"Error in callback: {e}")
+        logger.error(f"Error in callback: {e}", exc_info=True)
     
     return "OK"
 
@@ -929,29 +887,33 @@ def health():
 
 @app.route("/stats")
 def stats():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    
-    c.execute("SELECT COUNT(*) FROM users")
-    total_users = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM chats")
-    total_messages = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM users WHERE last_seen > ?",
-              [(datetime.now() - timedelta(hours=24)).isoformat()])
-    active_users = c.fetchone()[0]
-    
-    conn.close()
-    
-    return jsonify({
-        "total_users": total_users,
-        "total_messages": total_messages,
-        "active_24h": active_users,
-        "api_keys_active": len(GEMINI_KEYS),
-        "creator": BOT_CREATOR,
-        "year": BOT_YEAR
-    })
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        
+        c.execute("SELECT COUNT(*) FROM users")
+        total_users = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(*) FROM chats")
+        total_messages = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(*) FROM users WHERE last_seen > ?",
+                  [(datetime.now() - timedelta(hours=24)).isoformat()])
+        active_users = c.fetchone()[0]
+        
+        conn.close()
+        
+        return jsonify({
+            "total_users": total_users,
+            "total_messages": total_messages,
+            "active_24h": active_users,
+            "api_keys_active": len(GEMINI_KEYS),
+            "creator": BOT_CREATOR,
+            "year": BOT_YEAR
+        })
+    except Exception as e:
+        logger.error(f"Stats error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # Error Handlers
 @app.errorhandler(404)
@@ -979,9 +941,6 @@ def background_cleanup():
 
 # Main
 if __name__ == "__main__":
-    # Database already initialized at module load
-    
-    # Start background cleanup thread
     cleanup_thread = threading.Thread(target=background_cleanup, daemon=True)
     cleanup_thread.start()
     
