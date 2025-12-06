@@ -605,9 +605,11 @@ def generate_response(user_msg, user_id):
 ## ردك (واضح ومختصر):"""
 
     # Try with multiple keys
+    last_error = None
     for attempt in range(len(GEMINI_KEYS) * 2):
         try:
             current_key = key_manager.get_key()
+            logger.info(f"Attempt {attempt + 1}: Using API key #{GEMINI_KEYS.index(current_key) + 1}")
             
             genai.configure(api_key=current_key)
             model = genai.GenerativeModel(
@@ -616,12 +618,20 @@ def generate_response(user_msg, user_id):
                 generation_config=GEN_CONFIG
             )
             
-            response = model.generate_content(prompt)
+            logger.info(f"Sending request to Gemini for user {user_id}")
+            response = model.generate_content(prompt, request_options={"timeout": 30})
             
-            if not response or not response.text:
-                raise ValueError("Empty response")
+            if not response:
+                raise ValueError("No response from API")
+            
+            if not hasattr(response, 'text') or not response.text:
+                # Check if blocked
+                if hasattr(response, 'prompt_feedback'):
+                    logger.warning(f"Response blocked: {response.prompt_feedback}")
+                raise ValueError("Empty response text")
             
             reply = clean_text(response.text.strip())
+            logger.info(f"Got response: {len(reply)} chars")
             
             if len(reply) < 5:
                 raise ValueError("Response too short")
@@ -634,25 +644,36 @@ def generate_response(user_msg, user_id):
             key_manager.mark_success(current_key)
             log_event('response_generated', user_id, {'tokens': tokens})
             
+            logger.info(f"Successfully generated response for user {user_id}")
             return reply
             
         except Exception as e:
+            last_error = str(e)
             error = str(e).lower()
-            logger.error(f"Error attempt {attempt + 1}: {e}")
+            logger.error(f"Attempt {attempt + 1} failed: {e}", exc_info=True)
             
-            is_quota = "quota" in error or "resource" in error
+            is_quota = "quota" in error or "resource" in error or "429" in error
             key_manager.mark_fail(current_key, is_quota)
             
             if "safety" in error or "block" in error:
                 log_event('safety_block', user_id)
                 return "عذراً، لا أستطيع الرد على هذا الموضوع. دعنا نتحدث عن شيء آخر."
             
-            if attempt < len(GEMINI_KEYS) - 1:
-                time.sleep(0.5)
+            if attempt < len(GEMINI_KEYS) * 2 - 1:
+                logger.info(f"Retrying with different key...")
+                time.sleep(1)
                 continue
     
-    log_event('generation_failed', user_id)
-    return "عذراً، حدث خطأ تقني. حاول مرة أخرى بعد قليل."
+    logger.error(f"All attempts failed. Last error: {last_error}")
+    log_event('generation_failed', user_id, {'error': last_error})
+    
+    # Return more helpful error message
+    if "quota" in str(last_error).lower():
+        return "عذراً، وصلنا للحد الأقصى من الطلبات. حاول مرة أخرى بعد دقيقة."
+    elif "timeout" in str(last_error).lower():
+        return "عذراً، استغرق الطلب وقتاً طويلاً. حاول مرة أخرى."
+    else:
+        return f"عذراً، حدث خطأ تقني. حاول مرة أخرى بعد قليل.\n\nللدعم: أرسل 'معرفي' وأبلغ المطور"
 
 # LINE Handlers
 def send_loading_animation(user_id):
@@ -699,6 +720,8 @@ def handle_text_message(event):
     user_id = event.source.user_id
     user_msg = event.message.text.strip()
     
+    logger.info(f"Received message from {user_id}: {user_msg[:50]}...")
+    
     if not user_msg:
         return
     
@@ -718,8 +741,8 @@ def handle_text_message(event):
                         messages=[TextMessage(text=reply)]
                     )
                 )
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to send long message error: {e}")
         return
     
     # Rate limiting
@@ -744,19 +767,22 @@ def handle_text_message(event):
                         messages=[TextMessage(text=reply)]
                     )
                 )
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to send limit error: {e}")
         return
     
-    save_user(user_id)
-    send_loading_animation(user_id)
-    save_chat(user_id, 'user', user_msg)
-    log_event('message_received', user_id)
-    
-    bot_reply = generate_response(user_msg, user_id)
-    save_chat(user_id, 'assistant', bot_reply)
-    
     try:
+        save_user(user_id)
+        send_loading_animation(user_id)
+        save_chat(user_id, 'user', user_msg)
+        log_event('message_received', user_id)
+        
+        logger.info(f"Generating response for user {user_id}")
+        bot_reply = generate_response(user_msg, user_id)
+        logger.info(f"Generated reply for {user_id}: {len(bot_reply)} chars")
+        
+        save_chat(user_id, 'assistant', bot_reply)
+        
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.reply_message(
@@ -766,9 +792,24 @@ def handle_text_message(event):
                 )
             )
         log_event('message_sent', user_id)
+        logger.info(f"Successfully sent reply to {user_id}")
+        
     except Exception as e:
-        logger.error(f"Failed to send message: {e}")
+        logger.error(f"Failed to handle message from {user_id}: {e}", exc_info=True)
         log_event('send_failed', user_id, {'error': str(e)})
+        
+        # Try to send error message
+        try:
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text="عذراً، حدث خطأ. حاول مرة أخرى.")]
+                    )
+                )
+        except:
+            pass
 
 # Admin Routes
 def require_admin(f):
@@ -816,6 +857,27 @@ def admin_stats():
 def admin_clean():
     clean_old_data()
     return jsonify({"status": "cleaned"})
+
+@app.route("/admin/test-keys")
+@require_admin
+def test_keys():
+    """Test all Gemini API keys"""
+    results = {}
+    for i, key in enumerate(GEMINI_KEYS):
+        try:
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel("gemini-2.0-flash-exp")
+            response = model.generate_content("Say 'OK' if you work", request_options={"timeout": 10})
+            results[f"key_{i+1}"] = {
+                "status": "working",
+                "response": response.text[:50] if response.text else "No text"
+            }
+        except Exception as e:
+            results[f"key_{i+1}"] = {
+                "status": "failed",
+                "error": str(e)
+            }
+    return jsonify(results)
 
 # Public Routes
 @app.route("/callback", methods=["POST"])
