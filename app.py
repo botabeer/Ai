@@ -56,7 +56,7 @@ RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", "2"))
 
 # Bot Info
 BOT_NAME = "Smart Assistant"
-BOT_VERSION = "2.1"
+BOT_VERSION = "2.2"
 BOT_CREATOR = "عبير الدوسري"
 BOT_YEAR = "2025"
 
@@ -72,6 +72,34 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # Database
 DB_PATH = "chatbot.db"
+DB_TIMEOUT = 30.0
+db_lock = threading.Lock()
+
+# Database Helper Functions
+def get_db_connection():
+    """Get database connection with proper settings"""
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT, check_same_thread=False)
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA busy_timeout=30000')
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def execute_db_query(query_func, max_retries=3):
+    """Execute database query with retry logic"""
+    for attempt in range(max_retries):
+        try:
+            with db_lock:
+                return query_func()
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_retries - 1:
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            logger.error(f"Database error after {attempt + 1} attempts: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected database error: {e}")
+            return None
+    return None
 
 # Rate Limiter
 class RateLimiter:
@@ -181,8 +209,8 @@ SAFETY = [
 
 # Database Functions
 def init_db():
-    try:
-        conn = sqlite3.connect(DB_PATH)
+    def _init():
+        conn = get_db_connection()
         c = conn.cursor()
         
         c.execute('''CREATE TABLE IF NOT EXISTS users (
@@ -222,9 +250,9 @@ def init_db():
         conn.commit()
         conn.close()
         logger.info("Database initialized successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
-        raise
+        return True
+    
+    execute_db_query(_init)
 
 # Initialize database
 logger.info("Initializing database...")
@@ -232,8 +260,8 @@ init_db()
 logger.info("Database ready")
 
 def log_event(event_type, user_id=None, data=None):
-    try:
-        conn = sqlite3.connect(DB_PATH)
+    def _log():
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute(
             "INSERT INTO analytics (event_type, user_id, data, timestamp) VALUES (?, ?, ?, ?)",
@@ -241,25 +269,24 @@ def log_event(event_type, user_id=None, data=None):
         )
         conn.commit()
         conn.close()
-    except Exception as e:
-        logger.error(f"Failed to log event: {e}")
+        return True
+    
+    execute_db_query(_log)
 
 def get_user(user_id):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
+    def _get():
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
         user = c.fetchone()
         conn.close()
         return user
-    except Exception as e:
-        logger.error(f"Failed to get user: {e}")
-        return None
+    
+    return execute_db_query(_get)
 
 def save_user(user_id, name=None):
-    try:
-        conn = sqlite3.connect(DB_PATH)
+    def _save():
+        conn = get_db_connection()
         c = conn.cursor()
         now = datetime.now().isoformat()
         today = datetime.now().date().isoformat()
@@ -286,8 +313,9 @@ def save_user(user_id, name=None):
         
         conn.commit()
         conn.close()
-    except Exception as e:
-        logger.error(f"Failed to save user: {e}")
+        return True
+    
+    execute_db_query(_save)
 
 def check_daily_limit(user_id):
     user = get_user(user_id)
@@ -301,8 +329,8 @@ def check_daily_limit(user_id):
     return user['daily_count'] < MAX_DAILY_MESSAGES
 
 def save_chat(user_id, role, content, tokens=0):
-    try:
-        conn = sqlite3.connect(DB_PATH)
+    def _save():
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute(
             "INSERT INTO chats (user_id, role, content, tokens, timestamp) VALUES (?, ?, ?, ?, ?)",
@@ -310,13 +338,13 @@ def save_chat(user_id, role, content, tokens=0):
         )
         conn.commit()
         conn.close()
-    except Exception as e:
-        logger.error(f"Failed to save chat: {e}")
+        return True
+    
+    execute_db_query(_save)
 
 def get_history(user_id, limit=8):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
+    def _get():
+        conn = get_db_connection()
         c = conn.cursor()
         
         cutoff = (datetime.now() - timedelta(hours=48)).isoformat()
@@ -330,14 +358,14 @@ def get_history(user_id, limit=8):
         conn.commit()
         conn.close()
         
-        return list(reversed(rows))
-    except Exception as e:
-        logger.error(f"Failed to get history: {e}")
-        return []
+        return list(reversed(rows)) if rows else []
+    
+    result = execute_db_query(_get)
+    return result if result is not None else []
 
 def clean_old_data():
-    try:
-        conn = sqlite3.connect(DB_PATH)
+    def _clean():
+        conn = get_db_connection()
         c = conn.cursor()
         
         week_ago = (datetime.now() - timedelta(days=7)).isoformat()
@@ -349,8 +377,9 @@ def clean_old_data():
         conn.commit()
         conn.close()
         logger.info("Cleaned old data")
-    except Exception as e:
-        logger.error(f"Failed to clean data: {e}")
+        return True
+    
+    execute_db_query(_clean)
 
 # Text Processing
 def clean_text(text):
@@ -483,23 +512,20 @@ def generate_response(user_msg, user_id):
     # Check for commands
     msg_lower = user_msg.lower().strip()
     
-    # Help commands
     if msg_lower in ['start', 'help', 'مساعدة', 'ساعدني', 'الأوامر', 'أوامر', 'ساعد', 'مساعده']:
         return get_help_message()
     
-    # Reset commands
     if msg_lower in ['reset', 'إعادة', 'مسح', 'ابدأ من جديد', 'حذف المحادثة', 'اعادة', 'مسح المحادثة', 'ابدا من جديد', 'بداية جديدة']:
-        try:
-            conn = sqlite3.connect(DB_PATH)
+        def _reset():
+            conn = get_db_connection()
             c = conn.cursor()
             c.execute("DELETE FROM chats WHERE user_id=?", (user_id,))
             conn.commit()
             conn.close()
-        except Exception as e:
-            logger.error(f"Failed to reset chat: {e}")
+            return True
+        execute_db_query(_reset)
         return "تم مسح المحادثة بنجاح\nلنبدأ محادثة جديدة"
     
-    # ID commands
     if msg_lower in ['id', 'معرفي', 'ايديي', 'user id', 'my id', 'معرف', 'معرفي ايش', 'وش معرفي']:
         return f"""معرف حسابك في LINE:
 
@@ -509,11 +535,9 @@ def generate_response(user_msg, user_id):
 
 {BOT_YEAR} - {BOT_CREATOR}"""
     
-    # Stats commands
     if msg_lower in ['stats', 'إحصائياتي', 'احصائياتي', 'حسابي', 'بياناتي', 'احصائيات', 'إحصائيات', 'معلوماتي']:
         return get_user_stats(user_id)
     
-    # Info commands
     if msg_lower in ['info', 'معلومات', 'عن البوت', 'about', 'معلومات البوت', 'من أنت', 'من انت', 'وش البوت']:
         return get_bot_info()
     
@@ -688,56 +712,6 @@ def handle_text_message(event):
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
                 line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text=reply)]
-                    )
-                )
-        except Exception as e:
-            logger.error(f"Failed to send long message error: {e}")
-        return
-    
-    # Rate limiting
-    if not rate_limiter.is_allowed(user_id, RATE_LIMIT_SECONDS):
-        logger.info(f"Rate limit hit for user {user_id}")
-        return
-    
-    # Check daily limit
-    if not check_daily_limit(user_id):
-        reply = f"""وصلت للحد اليومي
-
-الحد الأقصى: {MAX_DAILY_MESSAGES} رسالة/يوم
-يمكنك المتابعة غدا
-
-{BOT_YEAR} - {BOT_CREATOR}"""
-        try:
-            with ApiClient(configuration) as api_client:
-                line_bot_api = MessagingApi(api_client)
-                line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text=reply)]
-                    )
-                )
-        except Exception as e:
-            logger.error(f"Failed to send limit error: {e}")
-        return
-    
-    try:
-        save_user(user_id)
-        send_loading_animation(user_id)
-        save_chat(user_id, 'user', user_msg)
-        log_event('message_received', user_id)
-        
-        logger.info(f"Generating response for user {user_id}")
-        bot_reply = generate_response(user_msg, user_id)
-        logger.info(f"Generated reply for {user_id}: {len(bot_reply)} chars")
-        
-        save_chat(user_id, 'assistant', bot_reply)
-        
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            line_bot_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
                     messages=[TextMessage(text=bot_reply)]
@@ -775,9 +749,8 @@ def require_admin(f):
 @app.route("/admin/stats")
 @require_admin
 def admin_stats():
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
+    def _get_stats():
+        conn = get_db_connection()
         c = conn.cursor()
         
         c.execute("SELECT COUNT(*) as total FROM users")
@@ -796,16 +769,18 @@ def admin_stats():
         
         conn.close()
         
-        return jsonify({
+        return {
             "users": {"total": total_users, "active_24h": active_24h},
             "messages": {"total": total_messages, "today": messages_today},
             "api_keys": key_manager.get_stats(),
             "creator": BOT_CREATOR,
             "year": BOT_YEAR
-        })
-    except Exception as e:
-        logger.error(f"Admin stats error: {e}")
-        return jsonify({"error": str(e)}), 500
+        }
+    
+    result = execute_db_query(_get_stats)
+    if result:
+        return jsonify(result)
+    return jsonify({"error": "Database error"}), 500
 
 @app.route("/admin/clean")
 @require_admin
@@ -872,7 +847,8 @@ def home():
             "Analytics tracking",
             f"{len(GEMINI_KEYS)} API keys",
             "Loading animations",
-            "LINE v3 SDK"
+            "LINE v3 SDK",
+            "Database locking fixed"
         ]
     })
 
@@ -887,33 +863,35 @@ def health():
 
 @app.route("/stats")
 def stats():
-    try:
-        conn = sqlite3.connect(DB_PATH)
+    def _get_stats():
+        conn = get_db_connection()
         c = conn.cursor()
         
-        c.execute("SELECT COUNT(*) FROM users")
-        total_users = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) as total FROM users")
+        total_users = c.fetchone()['total']
         
-        c.execute("SELECT COUNT(*) FROM chats")
-        total_messages = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) as total FROM chats")
+        total_messages = c.fetchone()['total']
         
-        c.execute("SELECT COUNT(*) FROM users WHERE last_seen > ?",
+        c.execute("SELECT COUNT(*) as active FROM users WHERE last_seen > ?",
                   [(datetime.now() - timedelta(hours=24)).isoformat()])
-        active_users = c.fetchone()[0]
+        active_users = c.fetchone()['active']
         
         conn.close()
         
-        return jsonify({
+        return {
             "total_users": total_users,
             "total_messages": total_messages,
             "active_24h": active_users,
             "api_keys_active": len(GEMINI_KEYS),
             "creator": BOT_CREATOR,
             "year": BOT_YEAR
-        })
-    except Exception as e:
-        logger.error(f"Stats error: {e}")
-        return jsonify({"error": str(e)}), 500
+        }
+    
+    result = execute_db_query(_get_stats)
+    if result:
+        return jsonify(result)
+    return jsonify({"error": "Database error"}), 500
 
 # Error Handlers
 @app.errorhandler(404)
@@ -955,6 +933,57 @@ if __name__ == "__main__":
     logger.info(f"API Keys: {len(GEMINI_KEYS)}")
     logger.info(f"Rate Limit: {RATE_LIMIT_SECONDS}s")
     logger.info(f"Daily Limit: {MAX_DAILY_MESSAGES} msgs")
+    logger.info(f"Database: WAL mode with locking protection")
     logger.info("=" * 60)
     
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    app.run(host="0.0.0.0", port=port, debug=debug)(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=reply)]
+                    )
+                )
+        except Exception as e:
+            logger.error(f"Failed to send long message error: {e}")
+        return
+    
+    # Rate limiting
+    if not rate_limiter.is_allowed(user_id, RATE_LIMIT_SECONDS):
+        logger.info(f"Rate limit hit for user {user_id}")
+        return
+    
+    # Check daily limit
+    if not check_daily_limit(user_id):
+        reply = f"""وصلت للحد اليومي
+
+الحد الأقصى: {MAX_DAILY_MESSAGES} رسالة/يوم
+يمكنك المتابعة غدا
+
+{BOT_YEAR} - {BOT_CREATOR}"""
+        try:
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=reply)]
+                    )
+                )
+        except Exception as e:
+            logger.error(f"Failed to send limit error: {e}")
+        return
+    
+    try:
+        save_user(user_id)
+        send_loading_animation(user_id)
+        save_chat(user_id, 'user', user_msg)
+        log_event('message_received', user_id)
+        
+        logger.info(f"Generating response for user {user_id}")
+        bot_reply = generate_response(user_msg, user_id)
+        logger.info(f"Generated reply for {user_id}: {len(bot_reply)} chars")
+        
+        save_chat(user_id, 'assistant', bot_reply)
+        
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.reply_message
