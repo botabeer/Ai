@@ -23,7 +23,7 @@ import re
 from functools import wraps
 from collections import defaultdict
 
-# ===================== Logging Setup =====================
+# Logging Setup
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -38,7 +38,7 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# ===================== Configuration =====================
+# Configuration
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
@@ -66,11 +66,11 @@ if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
 if not GEMINI_KEYS:
     raise ValueError("Missing Gemini API keys")
 
-# ===================== LINE v3 Setup =====================
+# LINE v3 Setup
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# ===================== Rate Limiter =====================
+# Rate Limiter
 class RateLimiter:
     def __init__(self):
         self.user_requests = defaultdict(list)
@@ -93,7 +93,7 @@ class RateLimiter:
 
 rate_limiter = RateLimiter()
 
-# ===================== Smart API Key Manager =====================
+# Smart API Key Manager
 class SmartKeyManager:
     def __init__(self, keys):
         self.keys = keys
@@ -108,7 +108,7 @@ class SmartKeyManager:
             } for k in keys
         }
         self.lock = threading.Lock()
-        logger.info(f"✅ Initialized with {len(keys)} API keys")
+        logger.info(f"Initialized with {len(keys)} API keys")
     
     def get_key(self):
         with self.lock:
@@ -162,7 +162,7 @@ class SmartKeyManager:
 
 key_manager = SmartKeyManager(GEMINI_KEYS)
 
-# ===================== Gemini Config =====================
+# Gemini Config
 GEN_CONFIG = {
     "temperature": 0.8,
     "top_p": 0.95,
@@ -177,50 +177,54 @@ SAFETY = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
 
-# ===================== Database =====================
+# Database
 DB_PATH = "chatbot.db"
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id TEXT PRIMARY KEY,
-        name TEXT,
-        first_seen TEXT,
-        last_seen TEXT,
-        msg_count INTEGER DEFAULT 0,
-        daily_count INTEGER DEFAULT 0,
-        daily_reset TEXT,
-        is_blocked INTEGER DEFAULT 0,
-        language TEXT DEFAULT 'ar'
-    )''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS chats (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        role TEXT,
-        content TEXT,
-        tokens INTEGER DEFAULT 0,
-        timestamp TEXT,
-        FOREIGN KEY (user_id) REFERENCES users(user_id)
-    )''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS analytics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        event_type TEXT,
-        user_id TEXT,
-        data TEXT,
-        timestamp TEXT
-    )''')
-    
-    c.execute('CREATE INDEX IF NOT EXISTS idx_user ON chats(user_id)')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_time ON chats(timestamp)')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_analytics ON analytics(user_id, timestamp)')
-    
-    conn.commit()
-    conn.close()
-    logger.info("✅ Database initialized")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            name TEXT,
+            first_seen TEXT,
+            last_seen TEXT,
+            msg_count INTEGER DEFAULT 0,
+            daily_count INTEGER DEFAULT 0,
+            daily_reset TEXT,
+            is_blocked INTEGER DEFAULT 0,
+            language TEXT DEFAULT 'ar'
+        )''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS chats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            role TEXT,
+            content TEXT,
+            tokens INTEGER DEFAULT 0,
+            timestamp TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS analytics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT,
+            user_id TEXT,
+            data TEXT,
+            timestamp TEXT
+        )''')
+        
+        c.execute('CREATE INDEX IF NOT EXISTS idx_user ON chats(user_id)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_time ON chats(timestamp)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_analytics ON analytics(user_id, timestamp)')
+        
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        raise
 
 def log_event(event_type, user_id=None, data=None):
     try:
@@ -325,11 +329,11 @@ def clean_old_data():
         
         conn.commit()
         conn.close()
-        logger.info("✅ Cleaned old data")
+        logger.info("Cleaned old data")
     except Exception as e:
         logger.error(f"Failed to clean data: {e}")
 
-# ===================== Text Processing =====================
+# Text Processing
 def clean_text(text):
     emoji_pattern = re.compile(
         "["
@@ -356,142 +360,106 @@ def detect_language(text):
 def estimate_tokens(text):
     return len(text.split()) * 1.3
 
-# ===================== Commands =====================
+# Commands
 def get_help_message():
-    """Get help message with all commands"""
-    return f"""📚 دليل استخدام البوت
+    return f"""دليل استخدام البوت
 
-⭐ ملخص سريع
+الأوامر الأساسية:
 
-🤖 الأوامر الأساسية:
-━━━━━━━━━━━━━━━━━
+• مساعدة أو help - عرض هذه الرسالة
+• إعادة أو مسح - مسح المحادثة والبدء من جديد
+• معرفي أو ايديي - عرض معرف حسابك
+• إحصائياتي أو حسابي - عرض إحصائياتك
+• معلومات أو عن البوت - معلومات عن البوت
 
-📌 مساعدة أو help
-   عرض هذه الرسالة
+القواعد:
+1. اكتب بشكل طبيعي
+2. كن واضحاً في سؤالك
+3. انتظر {RATE_LIMIT_SECONDS} ثانية بين الرسائل
+4. استخدم "إعادة" عند تغيير الموضوع
 
-🔄 إعادة أو مسح
-   مسح المحادثة والبدء من جديد
-
-🆔 معرفي أو ايديي
-   عرض معرف حسابك في LINE
-
-📊 إحصائياتي أو حسابي
-   عرض إحصائياتك الشخصية
-
-ℹ️ معلومات أو عن البوت
-   معلومات عن البوت
-
-━━━━━━━━━━━━━━━━━
-
-✨ القواعد الذهبية:
-
-1️⃣ اكتب بشكل طبيعي
-2️⃣ كن واضحاً في سؤالك
-3️⃣ انتظر {RATE_LIMIT_SECONDS} ثانية بين الرسائل
-4️⃣ استخدم "إعادة" عند تغيير الموضوع
-5️⃣ راقب حدك اليومي بـ "إحصائياتي"
-
-━━━━━━━━━━━━━━━━━
-
-💡 نصائح:
-• اكتب سؤالك مباشرة وسأجيب عليك
-• يمكنني التحدث بالعربية والإنجليزية
-• أتذكر آخر محادثاتنا لمدة 48 ساعة
-• جميع الأوامر تعمل بدون "/"
-
-⚡ الحدود اليومية:
+الحدود اليومية:
 • {MAX_DAILY_MESSAGES} رسالة يومياً
 • {RATE_LIMIT_SECONDS} ثانية بين الرسائل
 
-━━━━━━━━━━━━━━━━━
-© {BOT_YEAR} - تم الإنشاء بواسطة {BOT_CREATOR}"""
+{BOT_YEAR} - تم الإنشاء بواسطة {BOT_CREATOR}"""
 
 def get_welcome_message():
-    """Welcome message for new users"""
-    return f"""مرحباً بك! 👋
+    return f"""مرحباً بك
 
 أنا {BOT_NAME} - مساعدك الذكي
 
-🎯 ماذا أستطيع أن أفعل؟
+ماذا أستطيع أن أفعل؟
 • الإجابة على أسئلتك
 • النقاش في أي موضوع
 • تقديم النصائح والمعلومات
 • مساعدتك في حل المشاكل
 
-💬 ابدأ المحادثة:
-اكتب أي شيء وسأساعدك فوراً!
+ابدأ المحادثة:
+اكتب أي شيء وسأساعدك فوراً
 
-📝 للمساعدة: اكتب /help أو مساعدة
+للمساعدة: اكتب /help أو مساعدة
 
-━━━━━━━━━━━━━━━━━
-© {BOT_YEAR} - تم الإنشاء بواسطة {BOT_CREATOR}"""
+{BOT_YEAR} - تم الإنشاء بواسطة {BOT_CREATOR}"""
 
 def get_bot_info():
-    """Get bot information"""
-    return f"""ℹ️ معلومات البوت
+    return f"""معلومات البوت
 
-🤖 الاسم: {BOT_NAME}
-📌 الإصدار: v{BOT_VERSION}
-👩‍💻 المطورة: {BOT_CREATOR}
-📅 السنة: {BOT_YEAR}
+الاسم: {BOT_NAME}
+الإصدار: v{BOT_VERSION}
+المطورة: {BOT_CREATOR}
+السنة: {BOT_YEAR}
 
-⚙️ المواصفات:
+المواصفات:
 • يدعم اللغة العربية والإنجليزية
 • ذاكرة محادثة ذكية (48 ساعة)
 • نظام حماية متقدم
 • {len(GEMINI_KEYS)} مفاتيح API للأداء العالي
 
-🛡️ الحدود:
+الحدود:
 • {MAX_DAILY_MESSAGES} رسالة يومياً
 • {RATE_LIMIT_SECONDS} ثانية بين الرسائل
 
-🔗 التقنيات:
+التقنيات:
 • LINE Bot SDK v3
 • Google Gemini 2.0 AI
 • Python + Flask
 
-━━━━━━━━━━━━━━━━━
-© {BOT_YEAR} - جميع الحقوق محفوظة
+{BOT_YEAR} - جميع الحقوق محفوظة
 تم الإنشاء بواسطة {BOT_CREATOR}"""
 
 def get_user_stats(user_id):
-    """Get user statistics"""
     user = get_user(user_id)
     if not user:
         return "لم أجد بياناتك. جرب إرسال رسالة أولاً."
     
-    # Calculate days since first seen
     first_seen = datetime.fromisoformat(user['first_seen'])
     days_active = (datetime.now() - first_seen).days
     
-    # Get message count today
     today_count = user['daily_count']
     remaining = MAX_DAILY_MESSAGES - today_count
     
-    return f"""📊 إحصائياتك الشخصية
+    return f"""إحصائياتك الشخصية
 
-👤 معرف حسابك:
+معرف حسابك:
 {user_id}
 
-📈 الاستخدام:
+الاستخدام:
 • إجمالي الرسائل: {user['msg_count']}
 • رسائل اليوم: {today_count}/{MAX_DAILY_MESSAGES}
 • متبقي اليوم: {remaining} رسالة
 
-📅 النشاط:
+النشاط:
 • أول استخدام: {first_seen.strftime('%Y-%m-%d')}
 • آخر نشاط: {datetime.fromisoformat(user['last_seen']).strftime('%Y-%m-%d %H:%M')}
 • عدد الأيام: {days_active} يوم
 
-🌐 اللغة المفضلة: {'العربية' if user['language'] == 'ar' else 'English'}
+اللغة المفضلة: {'العربية' if user['language'] == 'ar' else 'English'}
 
-━━━━━━━━━━━━━━━━━
-© {BOT_YEAR} - {BOT_CREATOR}"""
+{BOT_YEAR} - {BOT_CREATOR}"""
 
-# ===================== AI Engine =====================
+# AI Engine
 def generate_response(user_msg, user_id):
-    """Generate intelligent response"""
-    
     lang = detect_language(user_msg)
     history = get_history(user_id, limit=8)
     context = ""
@@ -516,18 +484,17 @@ def generate_response(user_msg, user_id):
         c.execute("DELETE FROM chats WHERE user_id=?", (user_id,))
         conn.commit()
         conn.close()
-        return "✅ تم مسح المحادثة بنجاح!\nلنبدأ محادثة جديدة 😊"
+        return "تم مسح المحادثة بنجاح\nلنبدأ محادثة جديدة"
     
     # ID commands
     if msg_lower in ['id', 'معرفي', 'ايديي', 'user id', 'my id', 'معرف', 'معرفي ايش', 'وش معرفي']:
-        return f"""🆔 معرف حسابك في LINE:
+        return f"""معرف حسابك في LINE:
 
-`{user_id}`
+{user_id}
 
-💡 يمكنك استخدام هذا المعرف للدعم الفني أو الإبلاغ عن مشاكل.
+يمكنك استخدام هذا المعرف للدعم الفني أو الإبلاغ عن مشاكل.
 
-━━━━━━━━━━━━━━━━━
-© {BOT_YEAR} - {BOT_CREATOR}"""
+{BOT_YEAR} - {BOT_CREATOR}"""
     
     # Stats commands
     if msg_lower in ['stats', 'إحصائياتي', 'احصائياتي', 'حسابي', 'بياناتي', 'احصائيات', 'إحصائيات', 'معلوماتي']:
@@ -633,9 +600,8 @@ def generate_response(user_msg, user_id):
     log_event('generation_failed', user_id)
     return "عذراً، حدث خطأ تقني. حاول مرة أخرى بعد قليل."
 
-# ===================== LINE Handlers =====================
+# LINE Handlers
 def send_loading_animation(user_id):
-    """Show typing animation"""
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
@@ -650,7 +616,6 @@ def send_loading_animation(user_id):
 
 @handler.add(FollowEvent)
 def handle_follow(event):
-    """Handle when user adds bot"""
     user_id = event.source.user_id
     
     welcome_msg = get_welcome_message()
@@ -672,7 +637,6 @@ def handle_follow(event):
 
 @handler.add(UnfollowEvent)
 def handle_unfollow(event):
-    """Handle when user blocks bot"""
     user_id = event.source.user_id
     log_event('user_unfollow', user_id)
 
@@ -685,7 +649,7 @@ def handle_text_message(event):
         return
     
     if len(user_msg) > 3000:
-        reply = f"""⚠️ الرسالة طويلة جداً!
+        reply = f"""الرسالة طويلة جداً
 
 الحد الأقصى: 3000 حرف
 رسالتك: {len(user_msg)} حرف
@@ -711,13 +675,12 @@ def handle_text_message(event):
     
     # Check daily limit
     if not check_daily_limit(user_id):
-        reply = f"""⏳ وصلت للحد اليومي
+        reply = f"""وصلت للحد اليومي
 
 الحد الأقصى: {MAX_DAILY_MESSAGES} رسالة/يوم
-يمكنك المتابعة غداً 😊
+يمكنك المتابعة غداً
 
-━━━━━━━━━━━━━━━━━
-© {BOT_YEAR} - {BOT_CREATOR}"""
+{BOT_YEAR} - {BOT_CREATOR}"""
         try:
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
@@ -753,7 +716,7 @@ def handle_text_message(event):
         logger.error(f"Failed to send message: {e}")
         log_event('send_failed', user_id, {'error': str(e)})
 
-# ===================== Admin Routes =====================
+# Admin Routes
 def require_admin(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -800,7 +763,7 @@ def admin_clean():
     clean_old_data()
     return jsonify({"status": "cleaned"})
 
-# ===================== Public Routes =====================
+# Public Routes
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature")
@@ -874,7 +837,7 @@ def stats():
         "year": BOT_YEAR
     })
 
-# ===================== Error Handlers =====================
+# Error Handlers
 @app.errorhandler(404)
 def not_found(e):
     return jsonify({"error": "Not found"}), 404
@@ -888,7 +851,7 @@ def server_error(e):
     logger.error(f"Server error: {e}")
     return jsonify({"error": "Server error"}), 500
 
-# ===================== Background Tasks =====================
+# Background Tasks
 def background_cleanup():
     while True:
         try:
@@ -898,10 +861,14 @@ def background_cleanup():
         except Exception as e:
             logger.error(f"Background cleanup error: {e}")
 
-# ===================== Main =====================
+# Main
 if __name__ == "__main__":
+    # Initialize database FIRST before anything else
+    logger.info("Initializing database...")
     init_db()
+    logger.info("Database ready")
     
+    # Start background cleanup thread
     cleanup_thread = threading.Thread(target=background_cleanup, daemon=True)
     cleanup_thread.start()
     
@@ -909,13 +876,13 @@ if __name__ == "__main__":
     debug = os.getenv("DEBUG", "False").lower() == "true"
     
     logger.info("=" * 60)
-    logger.info(f"🚀 {BOT_NAME} v{BOT_VERSION}")
-    logger.info(f"👩‍💻 Created by: {BOT_CREATOR}")
-    logger.info(f"📅 Year: {BOT_YEAR}")
-    logger.info(f"📌 Port: {port}")
-    logger.info(f"🔑 API Keys: {len(GEMINI_KEYS)}")
-    logger.info(f"⚡ Rate Limit: {RATE_LIMIT_SECONDS}s")
-    logger.info(f"📊 Daily Limit: {MAX_DAILY_MESSAGES} msgs")
+    logger.info(f"{BOT_NAME} v{BOT_VERSION}")
+    logger.info(f"Created by: {BOT_CREATOR}")
+    logger.info(f"Year: {BOT_YEAR}")
+    logger.info(f"Port: {port}")
+    logger.info(f"API Keys: {len(GEMINI_KEYS)}")
+    logger.info(f"Rate Limit: {RATE_LIMIT_SECONDS}s")
+    logger.info(f"Daily Limit: {MAX_DAILY_MESSAGES} msgs")
     logger.info("=" * 60)
     
     app.run(host="0.0.0.0", port=port, debug=debug)
