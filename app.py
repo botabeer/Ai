@@ -162,6 +162,60 @@ class SmartKeyManager:
 
 key_manager = SmartKeyManager(GEMINI_KEYS)
 
+# Database
+DB_PATH = "chatbot.db"
+
+def init_db():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            name TEXT,
+            first_seen TEXT,
+            last_seen TEXT,
+            msg_count INTEGER DEFAULT 0,
+            daily_count INTEGER DEFAULT 0,
+            daily_reset TEXT,
+            is_blocked INTEGER DEFAULT 0,
+            language TEXT DEFAULT 'ar'
+        )''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS chats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            role TEXT,
+            content TEXT,
+            tokens INTEGER DEFAULT 0,
+            timestamp TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS analytics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT,
+            user_id TEXT,
+            data TEXT,
+            timestamp TEXT
+        )''')
+        
+        c.execute('CREATE INDEX IF NOT EXISTS idx_user ON chats(user_id)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_time ON chats(timestamp)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_analytics ON analytics(user_id, timestamp)')
+        
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        raise
+
+# Initialize database immediately when module loads
+logger.info("Initializing database on module load...")
+init_db()
+logger.info("Database ready")
+
 # Gemini Config
 GEN_CONFIG = {
     "temperature": 0.8,
@@ -863,10 +917,7 @@ def background_cleanup():
 
 # Main
 if __name__ == "__main__":
-    # Initialize database FIRST before anything else
-    logger.info("Initializing database...")
-    init_db()
-    logger.info("Database ready")
+    # Database already initialized at module load
     
     # Start background cleanup thread
     cleanup_thread = threading.Thread(target=background_cleanup, daemon=True)
