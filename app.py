@@ -22,6 +22,7 @@ import threading
 import re
 from functools import wraps
 from collections import defaultdict
+from queue import Queue
 
 # Logging Setup
 logging.basicConfig(
@@ -42,12 +43,24 @@ app = Flask(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
+# Gemini API Keys - يدعم حتى 6 مفاتيح
 GEMINI_KEYS = [
     os.getenv("GEMINI_API_KEY_1"),
     os.getenv("GEMINI_API_KEY_2"),
-    os.getenv("GEMINI_API_KEY_3")
+    os.getenv("GEMINI_API_KEY_3"),
+    os.getenv("GEMINI_API_KEY_4"),
+    os.getenv("GEMINI_API_KEY_5"),
+    os.getenv("GEMINI_API_KEY_6"),
 ]
 GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
+
+# Models - يدعم عدة مشغلات مع نظام التبديل التلقائي
+GEMINI_MODELS = [
+    "gemini-2.0-flash-exp",      # الأسرع والأحدث
+    "gemini-1.5-flash",          # سريع وموثوق
+    "gemini-1.5-flash-8b",       # خفيف وسريع جدا
+    "gemini-1.5-pro",            # الأقوى للمهام المعقدة
+]
 
 # Settings
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "")
@@ -56,7 +69,7 @@ RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", "2"))
 
 # Bot Info
 BOT_NAME = "Smart Assistant"
-BOT_VERSION = "2.2"
+BOT_VERSION = "2.4"
 BOT_CREATOR = "عبير الدوسري"
 BOT_YEAR = "2025"
 
@@ -75,9 +88,11 @@ DB_PATH = "chatbot.db"
 DB_TIMEOUT = 30.0
 db_lock = threading.Lock()
 
+# Message Queue for async processing
+message_queue = Queue()
+
 # Database Helper Functions
 def get_db_connection():
-    """Get database connection with proper settings"""
     conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT, check_same_thread=False)
     conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('PRAGMA busy_timeout=30000')
@@ -85,7 +100,6 @@ def get_db_connection():
     return conn
 
 def execute_db_query(query_func, max_retries=3):
-    """Execute database query with retry logic"""
     for attempt in range(max_retries):
         try:
             with db_lock:
@@ -124,73 +138,91 @@ class RateLimiter:
 
 rate_limiter = RateLimiter()
 
-# Smart API Key Manager
-class SmartKeyManager:
-    def __init__(self, keys):
+# Smart Model & Key Manager
+class SmartModelManager:
+    def __init__(self, keys, models):
         self.keys = keys
-        self.stats = {
-            k: {
-                'fails': 0, 
-                'success': 0, 
-                'last_fail': 0,
-                'total_requests': 0,
-                'quota_reset': 0
-            } for k in keys
-        }
+        self.models = models
+        self.stats = {}
+        
+        # Initialize stats for each combination of key and model
+        for key_idx, key in enumerate(keys):
+            for model_idx, model in enumerate(models):
+                combo_id = f"key{key_idx+1}_model{model_idx+1}"
+                self.stats[combo_id] = {
+                    'key': key,
+                    'model': model,
+                    'key_idx': key_idx,
+                    'model_idx': model_idx,
+                    'fails': 0,
+                    'success': 0,
+                    'last_fail': 0,
+                    'total_requests': 0,
+                    'quota_reset': 0
+                }
+        
         self.lock = threading.Lock()
-        logger.info(f"Initialized with {len(keys)} API keys")
+        logger.info(f"Initialized with {len(keys)} API keys and {len(models)} models")
+        logger.info(f"Total combinations: {len(self.stats)}")
     
-    def get_key(self):
+    def get_best_combo(self):
         with self.lock:
-            best_key = None
+            best_combo = None
             min_fails = float('inf')
             
-            for key in self.keys:
-                stats = self.stats[key]
-                
+            for combo_id, stats in self.stats.items():
+                # Reset fails after cooldown period
                 if stats['last_fail'] and (time.time() - stats['last_fail']) > 900:
                     stats['fails'] = 0
                     stats['last_fail'] = 0
                 
+                # Reset quota after 1 hour
                 if stats['quota_reset'] and (time.time() - stats['quota_reset']) > 3600:
                     stats['fails'] = 0
                     stats['quota_reset'] = 0
                 
+                # Find combination with least fails
                 if stats['fails'] < min_fails:
                     min_fails = stats['fails']
-                    best_key = key
+                    best_combo = combo_id
             
-            if best_key:
-                self.stats[best_key]['total_requests'] += 1
+            if best_combo:
+                self.stats[best_combo]['total_requests'] += 1
+                return self.stats[best_combo]['key'], self.stats[best_combo]['model'], best_combo
             
-            return best_key or self.keys[0]
+            # Fallback to first combination
+            first_combo = list(self.stats.keys())[0]
+            return self.stats[first_combo]['key'], self.stats[first_combo]['model'], first_combo
     
-    def mark_fail(self, key, is_quota=False):
+    def mark_fail(self, combo_id, is_quota=False):
         with self.lock:
-            if key in self.stats:
-                self.stats[key]['fails'] += 1
-                self.stats[key]['last_fail'] = time.time()
+            if combo_id in self.stats:
+                self.stats[combo_id]['fails'] += 1
+                self.stats[combo_id]['last_fail'] = time.time()
                 if is_quota:
-                    self.stats[key]['quota_reset'] = time.time()
+                    self.stats[combo_id]['quota_reset'] = time.time()
+                logger.warning(f"Marked fail for {combo_id}: {self.stats[combo_id]['fails']} fails")
     
-    def mark_success(self, key):
+    def mark_success(self, combo_id):
         with self.lock:
-            if key in self.stats:
-                self.stats[key]['success'] += 1
-                self.stats[key]['fails'] = max(0, self.stats[key]['fails'] - 1)
+            if combo_id in self.stats:
+                self.stats[combo_id]['success'] += 1
+                self.stats[combo_id]['fails'] = max(0, self.stats[combo_id]['fails'] - 1)
     
     def get_stats(self):
         with self.lock:
-            return {
-                f"key_{i+1}": {
+            summary = {}
+            for combo_id, stats in self.stats.items():
+                summary[combo_id] = {
+                    'model': stats['model'],
+                    'key_num': stats['key_idx'] + 1,
                     'success': stats['success'],
                     'fails': stats['fails'],
                     'total': stats['total_requests']
                 }
-                for i, (key, stats) in enumerate(self.stats.items())
-            }
+            return summary
 
-key_manager = SmartKeyManager(GEMINI_KEYS)
+model_manager = SmartModelManager(GEMINI_KEYS, GEMINI_MODELS)
 
 # Gemini Config
 GEN_CONFIG = {
@@ -254,7 +286,6 @@ def init_db():
     
     execute_db_query(_init)
 
-# Initialize database
 logger.info("Initializing database...")
 init_db()
 logger.info("Database ready")
@@ -270,7 +301,6 @@ def log_event(event_type, user_id=None, data=None):
         conn.commit()
         conn.close()
         return True
-    
     execute_db_query(_log)
 
 def get_user(user_id):
@@ -281,7 +311,6 @@ def get_user(user_id):
         user = c.fetchone()
         conn.close()
         return user
-    
     return execute_db_query(_get)
 
 def save_user(user_id, name=None):
@@ -314,18 +343,15 @@ def save_user(user_id, name=None):
         conn.commit()
         conn.close()
         return True
-    
     execute_db_query(_save)
 
 def check_daily_limit(user_id):
     user = get_user(user_id)
     if not user:
         return True
-    
     today = datetime.now().date().isoformat()
     if user['daily_reset'] != today:
         return True
-    
     return user['daily_count'] < MAX_DAILY_MESSAGES
 
 def save_chat(user_id, role, content, tokens=0):
@@ -339,7 +365,6 @@ def save_chat(user_id, role, content, tokens=0):
         conn.commit()
         conn.close()
         return True
-    
     execute_db_query(_save)
 
 def get_history(user_id, limit=8):
@@ -357,7 +382,6 @@ def get_history(user_id, limit=8):
         rows = c.fetchall()
         conn.commit()
         conn.close()
-        
         return list(reversed(rows)) if rows else []
     
     result = execute_db_query(_get)
@@ -378,7 +402,6 @@ def clean_old_data():
         conn.close()
         logger.info("Cleaned old data")
         return True
-    
     execute_db_query(_clean)
 
 # Text Processing
@@ -390,10 +413,7 @@ def clean_text(text):
 def detect_language(text):
     arabic_chars = len(re.findall(r'[\u0600-\u06FF]', text))
     english_chars = len(re.findall(r'[a-zA-Z]', text))
-    
-    if arabic_chars > english_chars:
-        return 'ar'
-    return 'en'
+    return 'ar' if arabic_chars > english_chars else 'en'
 
 def estimate_tokens(text):
     return int(len(text.split()) * 1.3)
@@ -405,22 +425,16 @@ def get_help_message():
 الأوامر الأساسية:
 
 - مساعدة أو help - عرض هذه الرسالة
-- إعادة أو مسح - مسح المحادثة والبدء من جديد
-- معرفي أو ايديي - عرض معرف حسابك
-- إحصائياتي أو حسابي - عرض إحصائياتك
-- معلومات أو عن البوت - معلومات عن البوت
-
-القواعد:
-1. اكتب بشكل طبيعي
-2. كن واضحا في سؤالك
-3. انتظر {RATE_LIMIT_SECONDS} ثانية بين الرسائل
-4. استخدم "إعادة" عند تغيير الموضوع
+- إعادة أو مسح - مسح المحادثة
+- معرفي أو ايديي - عرض معرفك
+- إحصائياتي أو حسابي - إحصائياتك
+- معلومات أو عن البوت - معلومات البوت
 
 الحدود اليومية:
 - {MAX_DAILY_MESSAGES} رسالة يوميا
 - {RATE_LIMIT_SECONDS} ثانية بين الرسائل
 
-{BOT_YEAR} - تم الإنشاء بواسطة {BOT_CREATOR}"""
+{BOT_YEAR} - {BOT_CREATOR}"""
 
 def get_welcome_message():
     return f"""مرحبا بك
@@ -433,12 +447,11 @@ def get_welcome_message():
 - تقديم النصائح والمعلومات
 - مساعدتك في حل المشاكل
 
-ابدأ المحادثة:
-اكتب أي شيء وسأساعدك فورا
+ابدأ المحادثة الآن
 
-للمساعدة: اكتب /help أو مساعدة
+للمساعدة: اكتب مساعدة
 
-{BOT_YEAR} - تم الإنشاء بواسطة {BOT_CREATOR}"""
+{BOT_YEAR} - {BOT_CREATOR}"""
 
 def get_bot_info():
     return f"""معلومات البوت
@@ -449,22 +462,20 @@ def get_bot_info():
 السنة: {BOT_YEAR}
 
 المواصفات:
-- يدعم اللغة العربية والإنجليزية
-- ذاكرة محادثة ذكية (48 ساعة)
-- نظام حماية متقدم
-- {len(GEMINI_KEYS)} مفاتيح API للأداء العالي
+- دعم العربية والإنجليزية
+- ذاكرة 48 ساعة
+- {len(GEMINI_KEYS)} مفاتيح API
+- {len(GEMINI_MODELS)} مشغلات AI
+- نظام تبديل ذكي تلقائي
 
 الحدود:
-- {MAX_DAILY_MESSAGES} رسالة يوميا
+- {MAX_DAILY_MESSAGES} رسالة/يوم
 - {RATE_LIMIT_SECONDS} ثانية بين الرسائل
 
-التقنيات:
-- LINE Bot SDK v3
-- Google Gemini 2.0 AI
-- Python + Flask
+المشغلات المتوفرة:
+{chr(10).join(f'- {model}' for model in GEMINI_MODELS)}
 
-{BOT_YEAR} - جميع الحقوق محفوظة
-تم الإنشاء بواسطة {BOT_CREATOR}"""
+{BOT_YEAR} - {BOT_CREATOR}"""
 
 def get_user_stats(user_id):
     user = get_user(user_id)
@@ -473,7 +484,6 @@ def get_user_stats(user_id):
     
     first_seen = datetime.fromisoformat(user['first_seen'])
     days_active = (datetime.now() - first_seen).days
-    
     today_count = user['daily_count']
     remaining = MAX_DAILY_MESSAGES - today_count
     
@@ -490,9 +500,7 @@ def get_user_stats(user_id):
 النشاط:
 - أول استخدام: {first_seen.strftime('%Y-%m-%d')}
 - آخر نشاط: {datetime.fromisoformat(user['last_seen']).strftime('%Y-%m-%d %H:%M')}
-- عدد الأيام: {days_active} يوم
-
-اللغة المفضلة: {'العربية' if user['language'] == 'ar' else 'English'}
+- الأيام النشطة: {days_active} يوم
 
 {BOT_YEAR} - {BOT_CREATOR}"""
 
@@ -512,10 +520,10 @@ def generate_response(user_msg, user_id):
     # Check for commands
     msg_lower = user_msg.lower().strip()
     
-    if msg_lower in ['start', 'help', 'مساعدة', 'ساعدني', 'الأوامر', 'أوامر', 'ساعد', 'مساعده']:
+    if msg_lower in ['start', 'help', 'مساعدة', 'ساعدني', 'الأوامر', 'أوامر']:
         return get_help_message()
     
-    if msg_lower in ['reset', 'إعادة', 'مسح', 'ابدأ من جديد', 'حذف المحادثة', 'اعادة', 'مسح المحادثة', 'ابدا من جديد', 'بداية جديدة']:
+    if msg_lower in ['reset', 'إعادة', 'مسح', 'ابدأ من جديد', 'حذف المحادثة']:
         def _reset():
             conn = get_db_connection()
             c = conn.cursor()
@@ -526,54 +534,45 @@ def generate_response(user_msg, user_id):
         execute_db_query(_reset)
         return "تم مسح المحادثة بنجاح\nلنبدأ محادثة جديدة"
     
-    if msg_lower in ['id', 'معرفي', 'ايديي', 'user id', 'my id', 'معرف', 'معرفي ايش', 'وش معرفي']:
-        return f"""معرف حسابك في LINE:
-
-{user_id}
-
-يمكنك استخدام هذا المعرف للدعم الفني أو الإبلاغ عن مشاكل.
-
-{BOT_YEAR} - {BOT_CREATOR}"""
+    if msg_lower in ['id', 'معرفي', 'ايديي', 'معرف']:
+        return f"معرف حسابك في LINE:\n\n{user_id}\n\n{BOT_YEAR} - {BOT_CREATOR}"
     
-    if msg_lower in ['stats', 'إحصائياتي', 'احصائياتي', 'حسابي', 'بياناتي', 'احصائيات', 'إحصائيات', 'معلوماتي']:
+    if msg_lower in ['stats', 'إحصائياتي', 'احصائياتي', 'حسابي']:
         return get_user_stats(user_id)
     
-    if msg_lower in ['info', 'معلومات', 'عن البوت', 'about', 'معلومات البوت', 'من أنت', 'من انت', 'وش البوت']:
+    if msg_lower in ['info', 'معلومات', 'عن البوت', 'about']:
         return get_bot_info()
     
     # Build system prompt
     if lang == 'ar':
-        system_prompt = """أنت مساعد ذكي محترف يتحدث العربية، أسلوبك مشابه لـ ChatGPT.
+        system_prompt = """أنت مساعد ذكي محترف يتحدث العربية.
 
 ## شخصيتك:
 - ذكي ومحترف
 - واضح ومباشر
-- ودود لكن احترافي
+- ودود احترافي
 - مختصر وفعال
 
 ## قواعد الرد:
-- كن مختصرا جدا (1-3 جمل للأسئلة البسيطة)
-- للمواضيع المعقدة: استخدم نقاط أو فقرات قصيرة
-- استخدم لغة طبيعية وبسيطة
+- كن مختصرا (1-3 جمل للأسئلة البسيطة)
+- للمواضيع المعقدة: نقاط قصيرة
+- لغة طبيعية بسيطة
 - ركز على الإجابة المفيدة
-- تجنب التكرار
-- كن دقيقا
-- اعترف إذا لم تعرف"""
+- كن دقيقا"""
     else:
-        system_prompt = """You are a smart, professional AI assistant similar to ChatGPT.
+        system_prompt = """You are a smart, professional AI assistant.
 
-## Your personality:
+## Personality:
 - Intelligent and professional
 - Clear and direct
 - Friendly but professional
 - Concise and effective
 
 ## Response rules:
-- Be very brief (1-3 sentences for simple questions)
-- For complex topics: use bullet points
-- Use natural language
+- Be brief (1-3 sentences for simple questions)
+- For complex topics: bullet points
+- Natural language
 - Focus on useful answers
-- Avoid repetition
 - Be accurate"""
     
     prompt = f"""{system_prompt}
@@ -585,22 +584,23 @@ def generate_response(user_msg, user_id):
 
 ## ردك (واضح ومختصر):"""
 
-    # Try with multiple keys
+    # Try with multiple model/key combinations
+    max_attempts = len(GEMINI_KEYS) * len(GEMINI_MODELS)
     last_error = None
-    for attempt in range(len(GEMINI_KEYS) * 2):
+    
+    for attempt in range(max_attempts):
         try:
-            current_key = key_manager.get_key()
-            logger.info(f"Attempt {attempt + 1}: Using API key #{GEMINI_KEYS.index(current_key) + 1}")
+            current_key, current_model, combo_id = model_manager.get_best_combo()
+            logger.info(f"Attempt {attempt + 1}/{max_attempts}: Using {combo_id} - {current_model}")
             
             genai.configure(api_key=current_key)
             model = genai.GenerativeModel(
-                "gemini-2.0-flash-exp",
+                current_model,
                 safety_settings=SAFETY,
                 generation_config=GEN_CONFIG
             )
             
-            logger.info(f"Sending request to Gemini for user {user_id}")
-            response = model.generate_content(prompt, request_options={"timeout": 30})
+            response = model.generate_content(prompt, request_options={"timeout": 20})
             
             if not response or not hasattr(response, 'text') or not response.text:
                 if hasattr(response, 'prompt_feedback'):
@@ -608,7 +608,7 @@ def generate_response(user_msg, user_id):
                 raise ValueError("Empty response from API")
             
             reply = clean_text(response.text.strip())
-            logger.info(f"Got response: {len(reply)} chars")
+            logger.info(f"Got response: {len(reply)} chars from {current_model}")
             
             if len(reply) < 5:
                 raise ValueError("Response too short")
@@ -618,59 +618,83 @@ def generate_response(user_msg, user_id):
                 reply = '.'.join(sentences[:5]) + '.'
             
             tokens = estimate_tokens(reply)
-            key_manager.mark_success(current_key)
-            log_event('response_generated', user_id, {'tokens': tokens})
+            model_manager.mark_success(combo_id)
+            log_event('response_generated', user_id, {'tokens': tokens, 'model': current_model})
             
-            logger.info(f"Successfully generated response for user {user_id}")
             return reply
             
         except Exception as e:
             last_error = str(e)
             error_lower = str(e).lower()
-            logger.error(f"Attempt {attempt + 1} failed: {e}")
+            logger.error(f"Attempt {attempt + 1} failed with {combo_id}: {e}")
             
             is_quota = "quota" in error_lower or "resource" in error_lower or "429" in error_lower
-            key_manager.mark_fail(current_key, is_quota)
+            model_manager.mark_fail(combo_id, is_quota)
             
             if "safety" in error_lower or "block" in error_lower:
                 log_event('safety_block', user_id)
                 return "عذرا، لا أستطيع الرد على هذا الموضوع. دعنا نتحدث عن شيء آخر."
             
-            if attempt < len(GEMINI_KEYS) * 2 - 1:
-                logger.info(f"Retrying with different key...")
-                time.sleep(1)
+            if attempt < max_attempts - 1:
+                time.sleep(0.3)
                 continue
     
     logger.error(f"All attempts failed. Last error: {last_error}")
     log_event('generation_failed', user_id, {'error': last_error})
     
     if "quota" in str(last_error).lower():
-        return "عذرا، وصلنا للحد الأقصى من الطلبات. حاول مرة أخرى بعد دقيقة."
-    elif "timeout" in str(last_error).lower():
-        return "عذرا، استغرق الطلب وقتا طويلا. حاول مرة أخرى."
-    else:
-        return f"عذرا، حدث خطأ تقني. حاول مرة أخرى بعد قليل.\n\nللدعم: أرسل 'معرفي' وأبلغ المطور"
+        return "عذرا، وصلنا للحد الأقصى. حاول مرة أخرى بعد دقيقة."
+    return "عذرا، حدث خطأ تقني. حاول مرة أخرى.\n\nللدعم: أرسل 'معرفي'"
 
-# LINE Handlers
+# LINE Helper Functions
 def send_loading_animation(user_id):
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.show_loading_animation(
-                ShowLoadingAnimationRequest(
-                    chatId=user_id,
-                    loadingSeconds=5
-                )
+                ShowLoadingAnimationRequest(chatId=user_id, loadingSeconds=5)
             )
     except Exception as e:
         logger.debug(f"Could not send loading animation: {e}")
 
+def send_push_message(user_id, text):
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.push_message(
+                PushMessageRequest(to=user_id, messages=[TextMessage(text=text)])
+            )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send push message: {e}")
+        return False
+
+# Async Message Processor
+def process_message_async(user_id, user_msg):
+    try:
+        logger.info(f"Processing message async for {user_id}")
+        bot_reply = generate_response(user_msg, user_id)
+        save_chat(user_id, 'assistant', bot_reply)
+        send_push_message(user_id, bot_reply)
+        log_event('message_sent', user_id)
+        logger.info(f"Successfully sent async reply to {user_id}")
+    except Exception as e:
+        logger.error(f"Failed to process async message: {e}", exc_info=True)
+        send_push_message(user_id, "عذرا، حدث خطأ. حاول مرة أخرى.")
+
+def message_worker():
+    while True:
+        try:
+            user_id, user_msg = message_queue.get()
+            process_message_async(user_id, user_msg)
+            message_queue.task_done()
+        except Exception as e:
+            logger.error(f"Message worker error: {e}")
+
+# LINE Event Handlers
 @handler.add(FollowEvent)
 def handle_follow(event):
     user_id = event.source.user_id
-    
-    welcome_msg = get_welcome_message()
-    
     save_user(user_id)
     log_event('user_follow', user_id)
     
@@ -678,18 +702,14 @@ def handle_follow(event):
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.push_message(
-                PushMessageRequest(
-                    to=user_id,
-                    messages=[TextMessage(text=welcome_msg)]
-                )
+                PushMessageRequest(to=user_id, messages=[TextMessage(text=get_welcome_message())])
             )
     except Exception as e:
         logger.error(f"Failed to send welcome: {e}")
 
 @handler.add(UnfollowEvent)
 def handle_unfollow(event):
-    user_id = event.source.user_id
-    log_event('user_unfollow', user_id)
+    log_event('user_unfollow', event.source.user_id)
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
@@ -702,288 +722,29 @@ def handle_text_message(event):
         return
     
     if len(user_msg) > 3000:
-        reply = f"""الرسالة طويلة جدا
-
-الحد الأقصى: 3000 حرف
-رسالتك: {len(user_msg)} حرف
-
-اختصر رسالتك وأعد المحاولة."""
+        reply = f"الرسالة طويلة جدا\n\nالحد الأقصى: 3000 حرف\nرسالتك: {len(user_msg)} حرف"
         try:
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
                 line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=bot_reply)]
-                )
-            )
-        log_event('message_sent', user_id)
-        logger.info(f"Successfully sent reply to {user_id}")
-        
-    except Exception as e:
-        logger.error(f"Failed to handle message from {user_id}: {e}", exc_info=True)
-        log_event('send_failed', user_id, {'error': str(e)})
-        
-        try:
-            with ApiClient(configuration) as api_client:
-                line_bot_api = MessagingApi(api_client)
-                line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text="عذرا، حدث خطأ. حاول مرة أخرى.")]
-                    )
-                )
-        except:
-            pass
-
-# Admin Routes
-def require_admin(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        auth = request.headers.get('X-Admin-Key')
-        if not ADMIN_USER_ID or auth != ADMIN_USER_ID:
-            abort(403)
-        return f(*args, **kwargs)
-    return decorated_function
-
-@app.route("/admin/stats")
-@require_admin
-def admin_stats():
-    def _get_stats():
-        conn = get_db_connection()
-        c = conn.cursor()
-        
-        c.execute("SELECT COUNT(*) as total FROM users")
-        total_users = c.fetchone()['total']
-        
-        c.execute("SELECT COUNT(*) as active FROM users WHERE last_seen > ?", 
-                  [(datetime.now() - timedelta(days=1)).isoformat()])
-        active_24h = c.fetchone()['active']
-        
-        c.execute("SELECT COUNT(*) as total FROM chats")
-        total_messages = c.fetchone()['total']
-        
-        c.execute("SELECT COUNT(*) as today FROM chats WHERE timestamp > ?",
-                  [datetime.now().date().isoformat()])
-        messages_today = c.fetchone()['today']
-        
-        conn.close()
-        
-        return {
-            "users": {"total": total_users, "active_24h": active_24h},
-            "messages": {"total": total_messages, "today": messages_today},
-            "api_keys": key_manager.get_stats(),
-            "creator": BOT_CREATOR,
-            "year": BOT_YEAR
-        }
-    
-    result = execute_db_query(_get_stats)
-    if result:
-        return jsonify(result)
-    return jsonify({"error": "Database error"}), 500
-
-@app.route("/admin/clean")
-@require_admin
-def admin_clean():
-    try:
-        clean_old_data()
-        return jsonify({"status": "cleaned"})
-    except Exception as e:
-        logger.error(f"Admin clean error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/admin/test-keys")
-@require_admin
-def test_keys():
-    results = {}
-    for i, key in enumerate(GEMINI_KEYS):
-        try:
-            genai.configure(api_key=key)
-            model = genai.GenerativeModel("gemini-2.0-flash-exp")
-            response = model.generate_content("Say 'OK' if you work", request_options={"timeout": 10})
-            results[f"key_{i+1}"] = {
-                "status": "working",
-                "response": response.text[:50] if response.text else "No text"
-            }
-        except Exception as e:
-            results[f"key_{i+1}"] = {
-                "status": "failed",
-                "error": str(e)
-            }
-    return jsonify(results)
-
-# Public Routes
-@app.route("/callback", methods=["POST"])
-def callback():
-    signature = request.headers.get("X-Line-Signature")
-    if not signature:
-        abort(400)
-    
-    body = request.get_data(as_text=True)
-    
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        logger.error("Invalid signature")
-        abort(400)
-    except Exception as e:
-        logger.error(f"Error in callback: {e}", exc_info=True)
-    
-    return "OK"
-
-@app.route("/")
-def home():
-    return jsonify({
-        "name": BOT_NAME,
-        "version": BOT_VERSION,
-        "creator": BOT_CREATOR,
-        "year": BOT_YEAR,
-        "status": "running",
-        "features": [
-            "Multi-language support",
-            "Smart context memory",
-            "Rate limiting",
-            "Daily limits",
-            "Analytics tracking",
-            f"{len(GEMINI_KEYS)} API keys",
-            "Loading animations",
-            "LINE v3 SDK",
-            "Database locking fixed"
-        ]
-    })
-
-@app.route("/health")
-def health():
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "keys": len(GEMINI_KEYS),
-        "creator": BOT_CREATOR
-    })
-
-@app.route("/stats")
-def stats():
-    def _get_stats():
-        conn = get_db_connection()
-        c = conn.cursor()
-        
-        c.execute("SELECT COUNT(*) as total FROM users")
-        total_users = c.fetchone()['total']
-        
-        c.execute("SELECT COUNT(*) as total FROM chats")
-        total_messages = c.fetchone()['total']
-        
-        c.execute("SELECT COUNT(*) as active FROM users WHERE last_seen > ?",
-                  [(datetime.now() - timedelta(hours=24)).isoformat()])
-        active_users = c.fetchone()['active']
-        
-        conn.close()
-        
-        return {
-            "total_users": total_users,
-            "total_messages": total_messages,
-            "active_24h": active_users,
-            "api_keys_active": len(GEMINI_KEYS),
-            "creator": BOT_CREATOR,
-            "year": BOT_YEAR
-        }
-    
-    result = execute_db_query(_get_stats)
-    if result:
-        return jsonify(result)
-    return jsonify({"error": "Database error"}), 500
-
-# Error Handlers
-@app.errorhandler(404)
-def not_found(e):
-    return jsonify({"error": "Not found"}), 404
-
-@app.errorhandler(403)
-def forbidden(e):
-    return jsonify({"error": "Forbidden"}), 403
-
-@app.errorhandler(500)
-def server_error(e):
-    logger.error(f"Server error: {e}")
-    return jsonify({"error": "Server error"}), 500
-
-# Background Tasks
-def background_cleanup():
-    while True:
-        try:
-            time.sleep(3600)
-            clean_old_data()
-            logger.info("Background cleanup completed")
-        except Exception as e:
-            logger.error(f"Background cleanup error: {e}")
-
-# Main
-if __name__ == "__main__":
-    cleanup_thread = threading.Thread(target=background_cleanup, daemon=True)
-    cleanup_thread.start()
-    
-    port = int(os.getenv("PORT", 10000))
-    debug = os.getenv("DEBUG", "False").lower() == "true"
-    
-    logger.info("=" * 60)
-    logger.info(f"{BOT_NAME} v{BOT_VERSION}")
-    logger.info(f"Created by: {BOT_CREATOR}")
-    logger.info(f"Year: {BOT_YEAR}")
-    logger.info(f"Port: {port}")
-    logger.info(f"API Keys: {len(GEMINI_KEYS)}")
-    logger.info(f"Rate Limit: {RATE_LIMIT_SECONDS}s")
-    logger.info(f"Daily Limit: {MAX_DAILY_MESSAGES} msgs")
-    logger.info(f"Database: WAL mode with locking protection")
-    logger.info("=" * 60)
-    
-    app.run(host="0.0.0.0", port=port, debug=debug)(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text=reply)]
-                    )
+                    ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply)])
                 )
         except Exception as e:
-            logger.error(f"Failed to send long message error: {e}")
+            logger.error(f"Failed to send error: {e}")
         return
     
-    # Rate limiting
     if not rate_limiter.is_allowed(user_id, RATE_LIMIT_SECONDS):
-        logger.info(f"Rate limit hit for user {user_id}")
+        logger.info(f"Rate limit hit for {user_id}")
         return
     
-    # Check daily limit
     if not check_daily_limit(user_id):
-        reply = f"""وصلت للحد اليومي
-
-الحد الأقصى: {MAX_DAILY_MESSAGES} رسالة/يوم
-يمكنك المتابعة غدا
-
-{BOT_YEAR} - {BOT_CREATOR}"""
+        reply = f"وصلت للحد اليومي\n\nالحد: {MAX_DAILY_MESSAGES} رسالة/يوم\nيمكنك المتابعة غدا"
         try:
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
                 line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text=reply)]
-                    )
+                    ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply)])
                 )
         except Exception as e:
             logger.error(f"Failed to send limit error: {e}")
         return
-    
-    try:
-        save_user(user_id)
-        send_loading_animation(user_id)
-        save_chat(user_id, 'user', user_msg)
-        log_event('message_received', user_id)
-        
-        logger.info(f"Generating response for user {user_id}")
-        bot_reply = generate_response(user_msg, user_id)
-        logger.info(f"Generated reply for {user_id}: {len(bot_reply)} chars")
-        
-        save_chat(user_id, 'assistant', bot_reply)
-        
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            line_bot_api.reply_message
