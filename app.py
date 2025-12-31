@@ -1,17 +1,6 @@
-# =========================
-# Smart Assistant Bot v2.8
-# Production Ready
-# =========================
-
-import os
-import re
-import time
-import sqlite3
-import threading
-import logging
-import warnings
+import os, re, time, sqlite3, threading, logging, warnings
 from queue import Queue
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import defaultdict
 
 from flask import Flask, request, abort, jsonify
@@ -20,73 +9,43 @@ from dotenv import load_dotenv
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
-    Configuration,
-    ApiClient,
-    MessagingApi,
-    ReplyMessageRequest,
-    PushMessageRequest,
-    TextMessage
+    Configuration, ApiClient, MessagingApi,
+    ReplyMessageRequest, PushMessageRequest, TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, FollowEvent
 
-# -------------------------
-# Warnings
-# -------------------------
 warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
 import google.generativeai as genai
 
-# -------------------------
-# Logging
-# -------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-logger = logging.getLogger("BOT")
-
-# -------------------------
-# App Init
-# -------------------------
+# ---------------- INIT ----------------
 load_dotenv()
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
-# -------------------------
-# ENV
-# -------------------------
+# ---------------- ENV ----------------
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
-GEMINI_KEYS = [k for k in [
+GEMINI_KEYS = [
     os.getenv("GEMINI_API_KEY_1"),
     os.getenv("GEMINI_API_KEY_2"),
     os.getenv("GEMINI_API_KEY_3"),
-    os.getenv("GEMINI_API_KEY_4")
-] if k]
+]
+GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 
-MAX_DAILY_MESSAGES = int(os.getenv("MAX_DAILY_MESSAGES", 100))
-RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", 2))
+MODEL_NAME = "gemini-2.0-flash-exp"
 PORT = int(os.getenv("PORT", 5000))
-
-BOT_NAME = "Smart Assistant"
-BOT_VERSION = "2.8"
-BOT_CREATOR = "عبير الدوسري"
-BOT_YEAR = "2025"
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     raise RuntimeError("Missing LINE credentials")
-
 if not GEMINI_KEYS:
-    raise RuntimeError("Missing Gemini API keys")
+    raise RuntimeError("Missing Gemini keys")
 
-# -------------------------
-# LINE
-# -------------------------
+# ---------------- LINE ----------------
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# -------------------------
-# Database
-# -------------------------
+# ---------------- DB ----------------
 DB_PATH = "chatbot.db"
 
 def get_db():
@@ -97,61 +56,45 @@ def get_db():
     return conn
 
 def init_db():
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id TEXT PRIMARY KEY,
-            first_seen TEXT,
-            last_seen TEXT,
-            msg_count INTEGER,
-            daily_count INTEGER,
-            daily_reset TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS chats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT,
-            role TEXT,
-            content TEXT,
-            timestamp TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-    logger.info("DB ready")
+    db = get_db()
+    db.execute("""CREATE TABLE IF NOT EXISTS users(
+        user_id TEXT PRIMARY KEY,
+        daily_count INTEGER,
+        daily_reset TEXT
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS chats(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        role TEXT,
+        content TEXT,
+        ts TEXT
+    )""")
+    db.commit()
+    db.close()
 
 init_db()
 
-# -------------------------
-# Rate Limiter
-# -------------------------
+# ---------------- RATE LIMIT ----------------
 class RateLimiter:
     def __init__(self):
         self.data = defaultdict(list)
 
-    def allow(self, user_id):
+    def allow(self, uid, seconds=2):
         now = time.time()
-        self.data[user_id] = [t for t in self.data[user_id] if now - t < 60]
-        self.data[user_id] = self.data[user_id][-5:]
-        if self.data[user_id] and now - self.data[user_id][-1] < RATE_LIMIT_SECONDS:
+        self.data[uid] = [t for t in self.data[uid] if now - t < 60][-5:]
+        if self.data[uid] and now - self.data[uid][-1] < seconds:
             return False
-        self.data[user_id].append(now)
+        self.data[uid].append(now)
         return True
 
 rate_limiter = RateLimiter()
 
-# -------------------------
-# Gemini Manager
-# -------------------------
-MODELS = ["gemini-1.5-flash", "gemini-1.5-flash-8b"]
-
+# ---------------- GEMINI ----------------
 GEN_CONFIG = {
-    "temperature": 0.8,
-    "top_p": 0.95,
+    "temperature": 0.7,
+    "top_p": 0.9,
     "top_k": 40,
-    "max_output_tokens": 500,
+    "max_output_tokens": 400
 }
 
 SAFETY = [{"category": c, "threshold": "BLOCK_NONE"} for c in [
@@ -161,213 +104,152 @@ SAFETY = [{"category": c, "threshold": "BLOCK_NONE"} for c in [
     "HARM_CATEGORY_DANGEROUS_CONTENT"
 ]]
 
-class GeminiManager:
-    def __init__(self):
-        self.key = 0
-        self.model = 0
+key_index = 0
+def next_key():
+    global key_index
+    key = GEMINI_KEYS[key_index]
+    key_index = (key_index + 1) % len(GEMINI_KEYS)
+    return key
 
-    def next(self):
-        k = GEMINI_KEYS[self.key]
-        m = MODELS[self.model]
-        self.model = (self.model + 1) % len(MODELS)
-        if self.model == 0:
-            self.key = (self.key + 1) % len(GEMINI_KEYS)
-        return k, m
+# ---------------- AI (صديقة داعمة مختصرة) ----------------
+def ai_reply(user_text):
+    system_prompt = """
+أنتِ صديقة قريبة وحكيمة.
+كلامك:
+- مختصر
+- صادق
+- بدون إيموجي
+- يوجّه للصح بهدوء
 
-gemini = GeminiManager()
+قواعد:
+- 1 إلى 3 جمل فقط
+- لا وعظ
+- لا مبالغة
+- استخدمي صيغة المؤنث
+"""
 
-# -------------------------
-# Helpers
-# -------------------------
-def detect_lang(text):
-    return "ar" if re.search(r"[\u0600-\u06FF]", text) else "en"
+    prompt = f"""{system_prompt}
 
-def clean(text):
-    return re.sub(r"\s+", " ", text.strip())
+كلام المستخدم:
+{user_text}
 
-# -------------------------
-# Users / Chats
-# -------------------------
-def save_user(user_id):
-    conn = get_db()
-    c = conn.cursor()
-    now = datetime.now().isoformat()
-    today = datetime.now().date().isoformat()
+رد الصديقة:
+"""
 
-    c.execute("SELECT daily_reset FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-
-    if row:
-        if row["daily_reset"] != today:
-            c.execute("""
-                UPDATE users
-                SET last_seen=?, msg_count=msg_count+1, daily_count=1, daily_reset=?
-                WHERE user_id=?
-            """, (now, today, user_id))
-        else:
-            c.execute("""
-                UPDATE users
-                SET last_seen=?, msg_count=msg_count+1, daily_count=daily_count+1
-                WHERE user_id=?
-            """, (now, user_id))
-    else:
-        c.execute("""
-            INSERT INTO users VALUES (?, ?, ?, 1, 1, ?)
-        """, (user_id, now, now, today))
-
-    conn.commit()
-    conn.close()
-
-def daily_allowed(user_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT daily_count, daily_reset FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    if not row:
-        return True
-    if row["daily_reset"] != datetime.now().date().isoformat():
-        return True
-    return row["daily_count"] < MAX_DAILY_MESSAGES
-
-def save_chat(user_id, role, text):
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO chats VALUES (NULL, ?, ?, ?, ?)",
-        (user_id, role, text, datetime.now().isoformat())
-    )
-    conn.commit()
-    conn.close()
-
-def get_history(user_id, limit=4):
-    conn = get_db()
-    cutoff = (datetime.now() - timedelta(hours=48)).isoformat()
-    conn.execute("DELETE FROM chats WHERE timestamp < ?", (cutoff,))
-    rows = conn.execute("""
-        SELECT role, content FROM chats
-        WHERE user_id=? ORDER BY id DESC LIMIT ?
-    """, (user_id, limit)).fetchall()
-    conn.commit()
-    conn.close()
-    return list(reversed(rows))
-
-# -------------------------
-# AI
-# -------------------------
-def ai_reply(user_id, text):
-    lang = detect_lang(text)
-    history = get_history(user_id)
-
-    ctx = ""
-    for h in history:
-        ctx += f"{h['role']}: {h['content']}\n"
-
-    system = "أجب باختصار." if lang == "ar" else "Answer briefly."
-    prompt = f"{system}\n{ctx}\nUser: {text}\nAssistant:"
-
-    for _ in range(4):
+    for _ in range(3):
         try:
-            key, model = gemini.next()
-            genai.configure(api_key=key)
-            ai = genai.GenerativeModel(
-                model,
+            genai.configure(api_key=next_key())
+            model = genai.GenerativeModel(
+                MODEL_NAME,
                 generation_config=GEN_CONFIG,
                 safety_settings=SAFETY
             )
-            res = ai.generate_content(prompt, request_options={"timeout": 8})
+            res = model.generate_content(prompt, request_options={"timeout": 8})
             if res and res.text:
-                return clean(res.text)[:1200]
-        except Exception as e:
-            logger.warning(e)
+                return re.sub(r"\s+", " ", res.text.strip())
+        except Exception:
             time.sleep(0.3)
 
-    return "عذرًا، حدث خطأ."
+    return "خلينا نوقف لحظة ونفكر بهدوء."
 
-# -------------------------
-# Queue Workers
-# -------------------------
+# ---------------- QUEUE + WORKERS ----------------
 queue = Queue()
 
 def worker():
     while True:
-        user_id, msg = queue.get()
+        uid, text = queue.get()
         try:
-            reply = ai_reply(user_id, msg)
-            save_chat(user_id, "assistant", reply)
-            with ApiClient(configuration) as api_client:
-                MessagingApi(api_client).push_message(
-                    PushMessageRequest(to=user_id, messages=[TextMessage(text=reply)])
+            reply = ai_reply(text)
+
+            db = get_db()
+            db.execute(
+                "INSERT INTO chats VALUES(NULL, ?, 'assistant', ?, ?)",
+                (uid, reply, datetime.now().isoformat())
+            )
+            db.commit()
+            db.close()
+
+            with ApiClient(configuration) as api:
+                MessagingApi(api).push_message(
+                    PushMessageRequest(to=uid, messages=[TextMessage(text=reply)])
                 )
-        except Exception as e:
-            logger.error(e)
         finally:
             queue.task_done()
 
 for _ in range(3):
     threading.Thread(target=worker, daemon=True).start()
 
-# -------------------------
-# LINE Events
-# -------------------------
+# ---------------- LINE EVENTS ----------------
 @handler.add(FollowEvent)
 def follow(event):
-    save_user(event.source.user_id)
-    with ApiClient(configuration) as api_client:
-        MessagingApi(api_client).push_message(
+    with ApiClient(configuration) as api:
+        MessagingApi(api).push_message(
             PushMessageRequest(
                 to=event.source.user_id,
-                messages=[TextMessage(text="👋 مرحبًا بك!")]
+                messages=[TextMessage(text="أهلًا فيك. أنا هنا أسمعك وأساعدك.")]
             )
         )
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def message(event):
-    user_id = event.source.user_id
+    uid = event.source.user_id
     text = event.message.text.strip()
+    if not text or not rate_limiter.allow(uid):
+        return
 
-    if not text or len(text) > 3000:
-        return
-    if not rate_limiter.allow(user_id):
-        return
-    if not daily_allowed(user_id):
-        MessagingApi(ApiClient(configuration)).reply_message(
+    db = get_db()
+    today = datetime.now().date().isoformat()
+    row = db.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+
+    if row:
+        if row["daily_reset"] != today:
+            db.execute(
+                "UPDATE users SET daily_count=1, daily_reset=? WHERE user_id=?",
+                (today, uid)
+            )
+        else:
+            db.execute(
+                "UPDATE users SET daily_count=daily_count+1 WHERE user_id=?",
+                (uid,)
+            )
+    else:
+        db.execute(
+            "INSERT INTO users VALUES (?, 1, ?)",
+            (uid, today)
+        )
+
+    db.execute(
+        "INSERT INTO chats VALUES(NULL, ?, 'user', ?, ?)",
+        (uid, text, datetime.now().isoformat())
+    )
+    db.commit()
+    db.close()
+
+    queue.put((uid, text))
+
+    with ApiClient(configuration) as api:
+        MessagingApi(api).reply_message(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text="⚠️ وصلت للحد اليومي")]
+                messages=[TextMessage(text="تمام، خليني أفكر.")]
             )
         )
-        return
 
-    save_user(user_id)
-    save_chat(user_id, "user", text)
-    queue.put((user_id, text))
-
-    MessagingApi(ApiClient(configuration)).reply_message(
-        ReplyMessageRequest(
-            reply_token=event.reply_token,
-            messages=[TextMessage(text="🤔 جاري التفكير...")]
-        )
-    )
-
-# -------------------------
-# Routes
-# -------------------------
+# ---------------- ROUTES ----------------
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "running", "bot": BOT_NAME, "version": BOT_VERSION})
+    return jsonify({"status": "running"})
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers.get("X-Line-Signature", "")
+    sig = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
     try:
-        handler.handle(body, signature)
+        handler.handle(body, sig)
     except InvalidSignatureError:
         abort(400)
     return "OK"
 
-# -------------------------
-# Run
-# -------------------------
+# ---------------- RUN ----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
