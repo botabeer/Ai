@@ -21,6 +21,7 @@ import google.generativeai as genai
 load_dotenv()
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("BOT")
 
 # ---------------- ENV ----------------
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
@@ -225,15 +226,8 @@ def message(event):
     db.commit()
     db.close()
 
+    # ضع الرسالة في queue فقط (لا يوجد رد مؤقت)
     queue.put((uid, text))
-
-    with ApiClient(configuration) as api:
-        MessagingApi(api).reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="تمام، خليني أفكر.")]
-            )
-        )
 
 # ---------------- ROUTES ----------------
 @app.route("/", methods=["GET"])
