@@ -43,7 +43,7 @@ app = Flask(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
-# Gemini API Keys - يدعم حتى 6 مفاتيح
+# Gemini API Keys
 GEMINI_KEYS = [
     os.getenv("GEMINI_API_KEY_1"),
     os.getenv("GEMINI_API_KEY_2"),
@@ -54,7 +54,7 @@ GEMINI_KEYS = [
 ]
 GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 
-# Models - يدعم عدة مشغلات مع نظام التبديل التلقائي
+# Models
 GEMINI_MODELS = [
     "gemini-2.0-flash-exp",
     "gemini-1.5-flash",
@@ -69,7 +69,7 @@ RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", "2"))
 
 # Bot Info
 BOT_NAME = "Smart Assistant"
-BOT_VERSION = "2.4"
+BOT_VERSION = "2.5"
 BOT_CREATOR = "عبير الدوسري"
 BOT_YEAR = "2025"
 
@@ -88,7 +88,7 @@ DB_PATH = "chatbot.db"
 DB_TIMEOUT = 30.0
 db_lock = threading.Lock()
 
-# Message Queue for async processing
+# Message Queue
 message_queue = Queue()
 
 # Database Helper Functions
@@ -138,7 +138,7 @@ class RateLimiter:
 
 rate_limiter = RateLimiter()
 
-# Smart Model & Key Manager
+# Smart Model Manager
 class SmartModelManager:
     def __init__(self, keys, models):
         self.keys = keys
@@ -162,7 +162,6 @@ class SmartModelManager:
         
         self.lock = threading.Lock()
         logger.info(f"Initialized with {len(keys)} API keys and {len(models)} models")
-        logger.info(f"Total combinations: {len(self.stats)}")
     
     def get_best_combo(self):
         with self.lock:
@@ -196,7 +195,6 @@ class SmartModelManager:
                 self.stats[combo_id]['last_fail'] = time.time()
                 if is_quota:
                     self.stats[combo_id]['quota_reset'] = time.time()
-                logger.warning(f"Marked fail for {combo_id}: {self.stats[combo_id]['fails']} fails")
     
     def mark_success(self, combo_id):
         with self.lock:
@@ -206,16 +204,16 @@ class SmartModelManager:
     
     def get_stats(self):
         with self.lock:
-            summary = {}
-            for combo_id, stats in self.stats.items():
-                summary[combo_id] = {
+            return {
+                combo_id: {
                     'model': stats['model'],
                     'key_num': stats['key_idx'] + 1,
                     'success': stats['success'],
                     'fails': stats['fails'],
                     'total': stats['total_requests']
                 }
-            return summary
+                for combo_id, stats in self.stats.items()
+            }
 
 model_manager = SmartModelManager(GEMINI_KEYS, GEMINI_MODELS)
 
@@ -276,14 +274,12 @@ def init_db():
         
         conn.commit()
         conn.close()
-        logger.info("Database initialized successfully")
+        logger.info("Database initialized")
         return True
     
     execute_db_query(_init)
 
-logger.info("Initializing database...")
 init_db()
-logger.info("Database ready")
 
 def log_event(event_type, user_id=None, data=None):
     def _log():
@@ -415,109 +411,89 @@ def estimate_tokens(text):
 
 # Commands
 def get_help_message():
-    return f"""دليل استخدام البوت 📚
+    return f"""📚 دليل استخدام البوت
 
 الأوامر الأساسية:
-• مساعدة / help - عرض هذه الرسالة
-• إعادة / مسح - مسح المحادثة
-• معرفي / ايديي - عرض معرفك
-• إحصائياتي / حسابي - إحصائياتك
-• معلومات / عن البوت - معلومات البوت
+• مساعدة / help
+• إعادة / مسح
+• معرفي / ايديي
+• إحصائياتي / حسابي
+• معلومات / عن البوت
 
-الحدود اليومية:
-• {MAX_DAILY_MESSAGES} رسالة يوميًا
+الحدود:
+• {MAX_DAILY_MESSAGES} رسالة/يوم
 • {RATE_LIMIT_SECONDS} ثانية بين الرسائل
 
 {BOT_YEAR} © {BOT_CREATOR}"""
 
 def get_welcome_message():
-    return f"""مرحبًا بك! 👋
+    return f"""👋 مرحبًا بك!
 
-أنا {BOT_NAME} - مساعدك الذكي 🤖
+أنا {BOT_NAME} 🤖
 
 ماذا أستطيع أن أفعل؟
 ✓ الإجابة على أسئلتك
 ✓ النقاش في أي موضوع
-✓ تقديم النصائح والمعلومات
-✓ مساعدتك في حل المشاكل
+✓ تقديم النصائح
+✓ المساعدة في حل المشاكل
 
 ابدأ المحادثة الآن! 💬
-
-للمساعدة: اكتب "مساعدة"
 
 {BOT_YEAR} © {BOT_CREATOR}"""
 
 def get_bot_info():
-    return f"""معلومات البوت ℹ️
+    return f"""ℹ️ معلومات البوت
 
-📱 الاسم: {BOT_NAME}
-🔢 الإصدار: v{BOT_VERSION}
-👩‍💻 المطورة: {BOT_CREATOR}
-📅 السنة: {BOT_YEAR}
+📱 {BOT_NAME} v{BOT_VERSION}
+👩‍💻 {BOT_CREATOR}
+📅 {BOT_YEAR}
 
 ⚙️ المواصفات:
-• دعم العربية والإنجليزية
+• {len(GEMINI_KEYS)} API keys
+• {len(GEMINI_MODELS)} AI models
+• نظام تبديل ذكي
 • ذاكرة 48 ساعة
-• {len(GEMINI_KEYS)} مفاتيح API
-• {len(GEMINI_MODELS)} مشغلات AI
-• نظام تبديل ذكي تلقائي
 
 📊 الحدود:
 • {MAX_DAILY_MESSAGES} رسالة/يوم
-• {RATE_LIMIT_SECONDS} ثانية بين الرسائل
-
-🤖 المشغلات المتوفرة:
-{chr(10).join(f'• {model}' for model in GEMINI_MODELS)}
-
-{BOT_YEAR} © {BOT_CREATOR}"""
+• {RATE_LIMIT_SECONDS}s بين الرسائل"""
 
 def get_user_stats(user_id):
     user = get_user(user_id)
     if not user:
-        return "لم أجد بياناتك. جرب إرسال رسالة أولًا."
+        return "لم أجد بياناتك. أرسل رسالة أولاً."
     
     first_seen = datetime.fromisoformat(user['first_seen'])
     days_active = (datetime.now() - first_seen).days
     today_count = user['daily_count']
     remaining = MAX_DAILY_MESSAGES - today_count
     
-    return f"""إحصائياتك الشخصية 📊
+    return f"""📊 إحصائياتك
 
-🆔 معرف حسابك:
-{user_id}
+🆔 {user_id}
 
 📈 الاستخدام:
-• إجمالي الرسائل: {user['msg_count']}
-• رسائل اليوم: {today_count}/{MAX_DAILY_MESSAGES}
-• متبقي اليوم: {remaining} رسالة
+• إجمالي: {user['msg_count']}
+• اليوم: {today_count}/{MAX_DAILY_MESSAGES}
+• متبقي: {remaining}
 
 ⏰ النشاط:
-• أول استخدام: {first_seen.strftime('%Y-%m-%d')}
-• آخر نشاط: {datetime.fromisoformat(user['last_seen']).strftime('%Y-%m-%d %H:%M')}
-• الأيام النشطة: {days_active} يوم
-
-{BOT_YEAR} © {BOT_CREATOR}"""
+• منذ: {first_seen.strftime('%Y-%m-%d')}
+• آخر نشاط: {datetime.fromisoformat(user['last_seen']).strftime('%H:%M')}
+• الأيام: {days_active}"""
 
 # AI Engine
 def generate_response(user_msg, user_id):
     lang = detect_language(user_msg)
     history = get_history(user_id, limit=8)
-    context = ""
     
-    if history:
-        context = "\n## السياق السابق:\n"
-        for msg in history[-6:]:
-            role = "المستخدم" if msg['role'] == 'user' else "أنت"
-            content = msg['content'][:200] if len(msg['content']) > 200 else msg['content']
-            context += f"{role}: {content}\n"
-    
-    # Check for commands
+    # Check commands
     msg_lower = user_msg.lower().strip()
     
-    if msg_lower in ['start', 'help', 'مساعدة', 'ساعدني', 'الأوامر', 'أوامر']:
+    if msg_lower in ['start', 'help', 'مساعدة', 'ساعدني', 'الأوامر']:
         return get_help_message()
     
-    if msg_lower in ['reset', 'إعادة', 'مسح', 'ابدأ من جديد', 'حذف المحادثة']:
+    if msg_lower in ['reset', 'إعادة', 'مسح', 'ابدأ من جديد']:
         def _reset():
             conn = get_db_connection()
             c = conn.cursor()
@@ -526,10 +502,10 @@ def generate_response(user_msg, user_id):
             conn.close()
             return True
         execute_db_query(_reset)
-        return "تم مسح المحادثة بنجاح ✅\nلنبدأ محادثة جديدة 🆕"
+        return "✅ تم مسح المحادثة\n🆕 لنبدأ محادثة جديدة"
     
     if msg_lower in ['id', 'معرفي', 'ايديي', 'معرف']:
-        return f"🆔 معرف حسابك في LINE:\n\n{user_id}\n\n{BOT_YEAR} © {BOT_CREATOR}"
+        return f"🆔 معرفك:\n{user_id}"
     
     if msg_lower in ['stats', 'إحصائياتي', 'احصائياتي', 'حسابي']:
         return get_user_stats(user_id)
@@ -537,55 +513,42 @@ def generate_response(user_msg, user_id):
     if msg_lower in ['info', 'معلومات', 'عن البوت', 'about']:
         return get_bot_info()
     
-    # Build system prompt
+    # Build context
+    context = ""
+    if history:
+        context = "\n## السياق:\n"
+        for msg in history[-6:]:
+            role = "المستخدم" if msg['role'] == 'user' else "أنت"
+            content = msg['content'][:200]
+            context += f"{role}: {content}\n"
+    
+    # System prompt
     if lang == 'ar':
-        system_prompt = """أنت مساعد ذكي محترف يتحدث العربية.
+        system_prompt = """أنت مساعد ذكي محترف.
 
-## شخصيتك:
-- ذكي ومحترف
+قواعد الرد:
+- مختصر (1-3 جمل)
 - واضح ومباشر
 - ودود احترافي
-- مختصر وفعال
-
-## قواعد الرد:
-- كن مختصرًا (1-3 جمل للأسئلة البسيطة)
-- للمواضيع المعقدة: نقاط قصيرة
-- لغة طبيعية بسيطة
-- ركز على الإجابة المفيدة
-- كن دقيقًا"""
+- دقيق ومفيد"""
     else:
-        system_prompt = """You are a smart, professional AI assistant.
+        system_prompt = """You are a smart assistant.
 
-## Personality:
-- Intelligent and professional
+Rules:
+- Brief (1-3 sentences)
 - Clear and direct
-- Friendly but professional
-- Concise and effective
-
-## Response rules:
-- Be brief (1-3 sentences for simple questions)
-- For complex topics: bullet points
-- Natural language
-- Focus on useful answers
-- Be accurate"""
+- Friendly professional
+- Accurate and helpful"""
     
-    prompt = f"""{system_prompt}
-
-{context}
-
-## السؤال الحالي:
-{user_msg}
-
-## ردك (واضح ومختصر):"""
-
-    # Try with multiple model/key combinations
+    prompt = f"{system_prompt}\n{context}\n## السؤال:\n{user_msg}\n## الرد:"
+    
+    # Try with multiple combinations
     max_attempts = len(GEMINI_KEYS) * len(GEMINI_MODELS)
-    last_error = None
     
     for attempt in range(max_attempts):
         try:
             current_key, current_model, combo_id = model_manager.get_best_combo()
-            logger.info(f"Attempt {attempt + 1}/{max_attempts}: Using {combo_id} - {current_model}")
+            logger.info(f"Try {attempt + 1}: {combo_id}")
             
             genai.configure(api_key=current_key)
             model = genai.GenerativeModel(
@@ -597,15 +560,12 @@ def generate_response(user_msg, user_id):
             response = model.generate_content(prompt, request_options={"timeout": 20})
             
             if not response or not hasattr(response, 'text') or not response.text:
-                if hasattr(response, 'prompt_feedback'):
-                    logger.warning(f"Response blocked: {response.prompt_feedback}")
-                raise ValueError("Empty response from API")
+                raise ValueError("Empty response")
             
             reply = clean_text(response.text.strip())
-            logger.info(f"Got response: {len(reply)} chars from {current_model}")
             
             if len(reply) < 5:
-                raise ValueError("Response too short")
+                raise ValueError("Too short")
             
             if len(reply) > 1500:
                 sentences = reply.split('.')
@@ -613,34 +573,26 @@ def generate_response(user_msg, user_id):
             
             tokens = estimate_tokens(reply)
             model_manager.mark_success(combo_id)
-            log_event('response_generated', user_id, {'tokens': tokens, 'model': current_model})
+            log_event('response_generated', user_id, {'tokens': tokens})
             
             return reply
             
         except Exception as e:
-            last_error = str(e)
             error_lower = str(e).lower()
-            logger.error(f"Attempt {attempt + 1} failed with {combo_id}: {e}")
+            logger.error(f"Attempt {attempt + 1} failed: {e}")
             
-            is_quota = "quota" in error_lower or "resource" in error_lower or "429" in error_lower
+            is_quota = "quota" in error_lower or "429" in error_lower
             model_manager.mark_fail(combo_id, is_quota)
             
             if "safety" in error_lower or "block" in error_lower:
-                log_event('safety_block', user_id)
-                return "عذرًا، لا أستطيع الرد على هذا الموضوع. دعنا نتحدث عن شيء آخر."
+                return "عذرًا، لا أستطيع الرد على هذا. دعنا نتحدث عن شيء آخر."
             
             if attempt < max_attempts - 1:
                 time.sleep(0.3)
-                continue
     
-    logger.error(f"All attempts failed. Last error: {last_error}")
-    log_event('generation_failed', user_id, {'error': last_error})
-    
-    if "quota" in str(last_error).lower():
-        return "عذرًا، وصلنا للحد الأقصى. حاول مرة أخرى بعد دقيقة."
-    return "عذرًا، حدث خطأ تقني. حاول مرة أخرى.\n\nللدعم: أرسل 'معرفي'"
+    return "عذرًا، حدث خطأ تقني. حاول مرة أخرى."
 
-# LINE Helper Functions
+# LINE Helpers
 def send_loading_animation(user_id):
     try:
         with ApiClient(configuration) as api_client:
@@ -649,7 +601,7 @@ def send_loading_animation(user_id):
                 ShowLoadingAnimationRequest(chatId=user_id, loadingSeconds=5)
             )
     except Exception as e:
-        logger.debug(f"Could not send loading animation: {e}")
+        logger.debug(f"Loading animation failed: {e}")
 
 def send_push_message(user_id, text):
     try:
@@ -660,21 +612,19 @@ def send_push_message(user_id, text):
             )
         return True
     except Exception as e:
-        logger.error(f"Failed to send push message: {e}")
+        logger.error(f"Push message failed: {e}")
         return False
 
-# Async Message Processor
+# Async Processor
 def process_message_async(user_id, user_msg):
     try:
-        logger.info(f"Processing message async for {user_id}")
         bot_reply = generate_response(user_msg, user_id)
         save_chat(user_id, 'assistant', bot_reply)
         send_push_message(user_id, bot_reply)
         log_event('message_sent', user_id)
-        logger.info(f"Successfully sent async reply to {user_id}")
     except Exception as e:
-        logger.error(f"Failed to process async message: {e}", exc_info=True)
-        send_push_message(user_id, "عذرًا، حدث خطأ. حاول مرة أخرى.")
+        logger.error(f"Async processing failed: {e}")
+        send_push_message(user_id, "عذرًا، حدث خطأ.")
 
 def message_worker():
     while True:
@@ -683,23 +633,15 @@ def message_worker():
             process_message_async(user_id, user_msg)
             message_queue.task_done()
         except Exception as e:
-            logger.error(f"Message worker error: {e}")
+            logger.error(f"Worker error: {e}")
 
-# LINE Event Handlers
+# Event Handlers
 @handler.add(FollowEvent)
 def handle_follow(event):
     user_id = event.source.user_id
     save_user(user_id)
     log_event('user_follow', user_id)
-    
-    try:
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            line_bot_api.push_message(
-                PushMessageRequest(to=user_id, messages=[TextMessage(text=get_welcome_message())])
-            )
-    except Exception as e:
-        logger.error(f"Failed to send welcome: {e}")
+    send_push_message(user_id, get_welcome_message())
 
 @handler.add(UnfollowEvent)
 def handle_unfollow(event):
@@ -710,44 +652,32 @@ def handle_text_message(event):
     user_id = event.source.user_id
     user_msg = event.message.text.strip()
     
-    logger.info(f"Received message from {user_id}: {user_msg[:50]}...")
-    
-    if not user_msg:
+    if not user_msg or len(user_msg) > 3000:
         return
     
-    # Check message length
-    if len(user_msg) > 3000:
-        reply = f"⚠️ الرسالة طويلة جدًا\n\nالحد الأقصى: 3000 حرف\nرسالتك: {len(user_msg)} حرف"
-        try:
-            with ApiClient(configuration) as api_client:
-                line_bot_api = MessagingApi(api_client)
-                line_bot_api.reply_message(
-                    ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply)])
-                )
-        except Exception as e:
-            logger.error(f"Failed to send limit error: {e}")
+    if not rate_limiter.is_allowed(user_id, RATE_LIMIT_SECONDS):
         return
     
-    # Save user and message
-    save_user(user_id)
-    save_chat(user_id, 'user', user_msg)
-    
-    # Send loading animation
-    send_loading_animation(user_id)
-    
-    # Add message to queue for async processing
-    message_queue.put((user_id, user_msg))
-    
-    # Send immediate acknowledgment
-    try:
+    if not check_daily_limit(user_id):
+        reply = f"⚠️ وصلت للحد اليومي\n{MAX_DAILY_MESSAGES} رسالة/يوم"
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            ack_msg = "جاري التفكير... 🤔" if detect_language(user_msg) == 'ar' else "Thinking... 🤔"
             line_bot_api.reply_message(
-                ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=ack_msg)])
+                ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply)])
             )
-    except Exception as e:
-        logger.error(f"Failed to send acknowledgment: {e}")
+        return
+    
+    save_user(user_id)
+    save_chat(user_id, 'user', user_msg)
+    send_loading_animation(user_id)
+    message_queue.put((user_id, user_msg))
+    
+    ack = "🤔 جاري التفكير..." if detect_language(user_msg) == 'ar' else "🤔 Thinking..."
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message(
+            ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=ack)])
+        )
 
 # Flask Routes
 @app.route("/", methods=['GET'])
@@ -756,8 +686,7 @@ def home():
         "status": "running",
         "bot": BOT_NAME,
         "version": BOT_VERSION,
-        "creator": BOT_CREATOR,
-        "year": BOT_YEAR
+        "creator": BOT_CREATOR
     })
 
 @app.route("/callback", methods=['POST'])
@@ -768,86 +697,47 @@ def callback():
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        logger.error("Invalid signature")
         abort(400)
     except Exception as e:
-        logger.error(f"Error handling webhook: {e}", exc_info=True)
+        logger.error(f"Webhook error: {e}")
     
     return 'OK'
 
 @app.route("/health", methods=['GET'])
 def health():
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat()
-    })
+    return jsonify({"status": "healthy"})
 
 @app.route("/stats", methods=['GET'])
 def stats():
-    auth_header = request.headers.get('Authorization')
-    if auth_header != f"Bearer {ADMIN_USER_ID}":
+    auth = request.headers.get('Authorization')
+    if auth != f"Bearer {ADMIN_USER_ID}":
         abort(401)
     
-    def _get_stats():
+    def _stats():
         conn = get_db_connection()
         c = conn.cursor()
-        
         c.execute("SELECT COUNT(*) as total FROM users")
-        total_users = c.fetchone()['total']
-        
-        c.execute("SELECT COUNT(*) as total FROM users WHERE daily_reset = ?", 
-                  (datetime.now().date().isoformat(),))
-        active_today = c.fetchone()['total']
-        
+        total = c.fetchone()['total']
         c.execute("SELECT COUNT(*) as total FROM chats")
-        total_messages = c.fetchone()['total']
-        
+        msgs = c.fetchone()['total']
         conn.close()
-        return {
-            'total_users': total_users,
-            'active_today': active_today,
-            'total_messages': total_messages,
-            'model_stats': model_manager.get_stats()
-        }
+        return {'users': total, 'messages': msgs, 'models': model_manager.get_stats()}
     
-    result = execute_db_query(_get_stats)
-    return jsonify(result if result else {"error": "Failed to get stats"})
+    return jsonify(execute_db_query(_stats))
 
 @app.route("/clean", methods=['POST'])
 def clean():
-    auth_header = request.headers.get('Authorization')
-    if auth_header != f"Bearer {ADMIN_USER_ID}":
+    auth = request.headers.get('Authorization')
+    if auth != f"Bearer {ADMIN_USER_ID}":
         abort(401)
-    
     clean_old_data()
     return jsonify({"status": "cleaned"})
 
-# Start worker thread
-worker_thread = threading.Thread(target=message_worker, daemon=True)
-worker_thread.start()
-logger.info("Message worker thread started")
-
-# Clean old data on startup
+# Start worker
+worker = threading.Thread(target=message_worker, daemon=True)
+worker.start()
 clean_old_data()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
-                line_bot_api = MessagingApi(api_client)
-                line_bot_api.reply_message(
-                    ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply)])
-                )
-        except Exception as e:
-            logger.error(f"Failed to send error: {e}")
-        return
-    
-    # Check rate limit
-    if not rate_limiter.is_allowed(user_id, RATE_LIMIT_SECONDS):
-        logger.info(f"Rate limit hit for {user_id}")
-        return
-    
-    # Check daily limit
-    if not check_daily_limit(user_id):
-        reply = f"⚠️ وصلت للحد اليومي\n\nالحد: {MAX_DAILY_MESSAGES} رسالة/يوم\nيمكنك المتابعة غدًا 🔄"
-        try:
-            with ApiClient(configuration) as api_client:
+    app.run(host='0.0.0.0', port=port)
