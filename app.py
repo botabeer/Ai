@@ -1,77 +1,65 @@
-# app.py
 import os
-from flask import Flask, request, jsonify
-from google import genai
 import random
-import time
+from flask import Flask, request, jsonify
 
-app = Flask(__name__)
-
-# ===== إعداد المفاتيح الثلاثة =====
+# جلب مفاتيح Gemini من Environment
 GEMINI_KEYS = [
     os.getenv("GEMINI_KEY_1"),
     os.getenv("GEMINI_KEY_2"),
     os.getenv("GEMINI_KEY_3")
 ]
 
+# تحقق من وجود جميع المفاتيح
 if not all(GEMINI_KEYS):
     raise Exception("⚠️ يجب تعيين جميع مفاتيح GEMINI_KEY_1, 2, 3 في Environment")
 
-# مؤشر المفتاح الحالي
+# عداد لتتبع المفتاح الحالي
 current_key_index = 0
 
-# ===== دالة للحصول على المفتاح التالي =====
+app = Flask(__name__)
+
 def get_next_key():
+    """إرجاع المفتاح الحالي والتبديل للمفتاح التالي"""
     global current_key_index
     key = GEMINI_KEYS[current_key_index]
     current_key_index = (current_key_index + 1) % len(GEMINI_KEYS)
     return key
 
-# ===== دالة إرسال الطلب إلى Gemini مع المحاولة التلقائية =====
-def send_to_gemini(prompt, max_retries=None):
-    if max_retries is None:
-        max_retries = len(GEMINI_KEYS)
-    
-    last_error = None
+def ask_gemini_api(prompt, key):
+    """
+    هذه دالة وهمية تحاكي إرسال الطلب إلى Google Gemini
+    ويمكنك استبدالها بالكود الحقيقي لمكتبة google-genai
+    """
+    # مثال: فشل مفتاح معين بشكل عشوائي لمحاكاة انتهاء quota
+    if random.random() < 0.3:  # 30% احتمالية فشل المفتاح
+        raise Exception("Quota exceeded for this key")
+    return f"رد وهمي على '{prompt}' باستخدام المفتاح {key[-4:]}"
 
-    for _ in range(max_retries):
-        api_key = get_next_key()
-        client = genai.Client(api_key=api_key)
-        try:
-            response = client.responses.create(
-                model="gemini-1.5",
-                input=prompt
-            )
-            return response.output_text
-        except Exception as e:
-            # إذا انتهى الحد اليومي أو أي خطأ، نحفظ الخطأ ونجرب المفتاح التالي
-            last_error = e
-            continue
-
-    # إذا لم تنجح أي محاولة، نرجع الخطأ النهائي
-    raise last_error
-
-# ===== واجهة Chat =====
-@app.route("/chat", methods=["POST"])
-def chat():
+@app.route("/ask", methods=["POST"])
+def ask_gemini():
     data = request.json
-    prompt = data.get("prompt", "")
-    
+    prompt = data.get("prompt")
     if not prompt:
-        return jsonify({"error": "لا يوجد نص للإرسال"}), 400
+        return jsonify({"error": "يجب إرسال prompt"}), 400
 
-    try:
-        answer = send_to_gemini(prompt)
-        return jsonify({"response": answer})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    tried_keys = 0
+    max_keys = len(GEMINI_KEYS)
+    response_text = None
 
-# ===== صفحة رئيسية =====
-@app.route("/", methods=["GET"])
-def index():
-    return "🔥 تطبيق Gemini جاهز ويعمل مع تبديل المفاتيح تلقائيًا!"
+    while tried_keys < max_keys:
+        key = get_next_key()
+        print(f"🔑 محاولة استخدام المفتاح: {key}")
+        try:
+            response_text = ask_gemini_api(prompt, key)
+            break  # نجح المفتاح، نخرج من الحلقة
+        except Exception as e:
+            print(f"❌ المفتاح {key} فشل: {str(e)}")
+            tried_keys += 1
 
-# ===== تشغيل التطبيق =====
+    if response_text is None:
+        return jsonify({"error": "⚠️ جميع المفاتيح الثلاثة انتهى حدها اليومي"}), 503
+
+    return jsonify({"response": response_text})
+
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
