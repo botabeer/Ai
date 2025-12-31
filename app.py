@@ -48,42 +48,64 @@ def save_key_status(status):
 def get_active_gemini_client():
     """الحصول على مفتاح Gemini نشط"""
     status = load_key_status()
-    current_index = status['current_key_index']
+    current_index = status.get('current_key_index', 0)
+    failed_keys = status.get('failed_keys', [])
     
     # إعادة تعيين يومياً
-    last_reset = datetime.fromisoformat(status['last_reset'])
+    last_reset = datetime.fromisoformat(status.get('last_reset', datetime.now().isoformat()))
     if datetime.now() - last_reset > timedelta(days=1):
         current_index = 0
-        status = {'current_key_index': 0, 'last_reset': datetime.now().isoformat()}
+        failed_keys = []
+        status = {
+            'current_key_index': 0, 
+            'last_reset': datetime.now().isoformat(),
+            'failed_keys': []
+        }
         save_key_status(status)
     
+    # جرب المفتاح الحالي أولاً
     for i in range(len(GEMINI_KEYS)):
         key_index = (current_index + i) % len(GEMINI_KEYS)
+        
+        # تجاهل المفاتيح الفاشلة
+        if key_index in failed_keys:
+            continue
+        
         try:
             genai.configure(api_key=GEMINI_KEYS[key_index])
             model = genai.GenerativeModel('gemini-2.0-flash-exp')
-            # اختبار المفتاح
-            model.generate_content("test")
             
+            # تحديث المفتاح النشط
             if key_index != current_index:
                 status['current_key_index'] = key_index
                 save_key_status(status)
+                print(f"تم التبديل للمفتاح رقم {key_index + 1}")
             
             return model
         except Exception as e:
-            if "quota" in str(e).lower() or "limit" in str(e).lower():
+            error_msg = str(e).lower()
+            if "quota" in error_msg or "limit" in error_msg or "resource" in error_msg:
+                print(f"المفتاح {key_index + 1} وصل للحد اليومي")
+                if key_index not in failed_keys:
+                    failed_keys.append(key_index)
+                    status['failed_keys'] = failed_keys
+                    save_key_status(status)
                 continue
             else:
-                raise e
+                print(f"خطأ في المفتاح {key_index + 1}: {e}")
+                continue
     
     raise Exception("جميع مفاتيح API وصلت للحد اليومي")
 
 def get_coach_response(user_message, user_id):
     """الحصول على رد من مدرب الحياة"""
-    try:
-        model = get_active_gemini_client()
-        
-        system_prompt = """أنت مدربة حياة شخصية رقمية ومحفزة.
+    max_retries = len(GEMINI_KEYS)
+    
+    for attempt in range(max_retries):
+        try:
+            model = get_active_gemini_client()
+            
+            system_prompt = """أنت مدربة حياة شخصية رقمية ومحفزة.
 
 خصائصك:
 - تتحدثين بأسلوب صديق مقرب وداعم
@@ -102,25 +124,46 @@ def get_coach_response(user_message, user_id):
 
 تذكري: أنت صديقة تدعم وتحفز، ليست معالجة نفسية."""
 
-        chat = model.start_chat(history=[])
-        
-        full_prompt = f"{system_prompt}\n\nالرسالة: {user_message}\n\nالرد:"
-        
-        response = chat.send_message(
-            full_prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.9,
-                top_p=0.95,
-                top_k=40,
-                max_output_tokens=200,
+            chat = model.start_chat(history=[])
+            
+            full_prompt = f"{system_prompt}\n\nالرسالة: {user_message}\n\nالرد:"
+            
+            response = chat.send_message(
+                full_prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.9,
+                    top_p=0.95,
+                    top_k=40,
+                    max_output_tokens=200,
+                )
             )
-        )
-        
-        return response.text.strip()
-        
-    except Exception as e:
-        print(f"خطأ في Gemini: {e}")
-        return "عذراً، حصل خطأ مؤقت. حاول مرة أخرى."
+            
+            return response.text.strip()
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            print(f"خطأ في المحاولة {attempt + 1}: {e}")
+            
+            if "quota" in error_msg or "limit" in error_msg or "resource" in error_msg:
+                # علّم المفتاح الحالي كفاشل وحاول المفتاح التالي
+                status = load_key_status()
+                current_key = status.get('current_key_index', 0)
+                failed_keys = status.get('failed_keys', [])
+                
+                if current_key not in failed_keys:
+                    failed_keys.append(current_key)
+                    status['failed_keys'] = failed_keys
+                    status['current_key_index'] = (current_key + 1) % len(GEMINI_KEYS)
+                    save_key_status(status)
+                
+                if attempt < max_retries - 1:
+                    continue
+                else:
+                    return "عذراً، الخدمة مشغولة حالياً. حاول بعد قليل."
+            else:
+                return "عذراً، حصل خطأ مؤقت. حاول مرة أخرى."
+    
+    return "عذراً، الخدمة غير متوفرة حالياً. حاول لاحقاً."
 
 @app.route("/callback", methods=['POST'])
 def callback():
