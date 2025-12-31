@@ -1,325 +1,106 @@
-import os, re, time, sqlite3, threading, logging, warnings
-from queue import Queue
-from datetime import datetime
-from collections import defaultdict
+import os
+import random
+from flask import Flask, request
+import google.genai as genai
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import TextSendMessage
 
-from flask import Flask, request, abort, jsonify
-from dotenv import load_dotenv
-
-from linebot.v3 import WebhookHandler
-from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging import (
-    Configuration, ApiClient, MessagingApi,
-    ReplyMessageRequest, PushMessageRequest, TextMessage
-)
-from linebot.v3.webhooks import MessageEvent, TextMessageContent, FollowEvent
-
-# المكتبة الجديدة
-from google import genai
-
-# ---------------- INIT ----------------
-load_dotenv()
+# ==========================
+# إعداد التطبيق
+# ==========================
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("BOT")
 
-# ---------------- ENV ----------------
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-
+# قائمة مفاتيح Gemini
 GEMINI_KEYS = [
-    os.getenv("GEMINI_API_KEY_1"),
-    os.getenv("GEMINI_API_KEY_2"),
-    os.getenv("GEMINI_API_KEY_3"),
+    os.environ.get("GEMINI_API_KEY_1"),
+    os.environ.get("GEMINI_API_KEY_2"),
+    os.environ.get("GEMINI_API_KEY_3")
 ]
-GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 
-MODEL_NAME = "gemini-2.0-flash-exp"
-PORT = int(os.getenv("PORT", 5000))
+current_key_index = 0
 
-if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
-    raise RuntimeError("Missing LINE credentials")
-if not GEMINI_KEYS:
-    raise RuntimeError("Missing Gemini keys")
+def set_gemini_key():
+    """تعيين مفتاح Gemini الحالي"""
+    global current_key_index
+    key = GEMINI_KEYS[current_key_index]
+    genai.configure(api_key=key)
 
-# ---------------- LINE ----------------
-configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
+# تعيين أول مفتاح تلقائيًا عند بداية التطبيق
+set_gemini_key()
+
+# إعداد Line Bot
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# ---------------- DB ----------------
-DB_PATH = "chatbot.db"
-
-def get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=15)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    return conn
-
-def init_db():
-    db = get_db()
-    db.execute("""CREATE TABLE IF NOT EXISTS users(
-        user_id TEXT PRIMARY KEY,
-        daily_count INTEGER,
-        daily_reset TEXT,
-        daily_type TEXT DEFAULT 'تحفيز'
-    )""")
-    db.execute("""CREATE TABLE IF NOT EXISTS chats(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        role TEXT,
-        content TEXT,
-        ts TEXT
-    )""")
-    db.commit()
-    db.close()
-
-init_db()
-
-# ---------------- RATE LIMIT ----------------
-class RateLimiter:
-    def __init__(self):
-        self.data = defaultdict(list)
-
-    def allow(self, uid, seconds=2):
-        now = time.time()
-        self.data[uid] = [t for t in self.data[uid] if now - t < 60][-5:]
-        if self.data[uid] and now - self.data[uid][-1] < seconds:
-            return False
-        self.data[uid].append(now)
-        return True
-
-rate_limiter = RateLimiter()
-
-# ---------------- GEMINI ----------------
-GEN_CONFIG = {
-    "temperature": 0.7,
-    "top_p": 0.9,
-    "top_k": 40,
-    "max_output_tokens": 400
-}
-
-SAFETY = [{"category": c, "threshold": "BLOCK_NONE"} for c in [
-    "HARM_CATEGORY_HARASSMENT",
-    "HARM_CATEGORY_HATE_SPEECH",
-    "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-    "HARM_CATEGORY_DANGEROUS_CONTENT"
-]]
-
-key_index = 0
-def next_key():
-    global key_index
-    key = GEMINI_KEYS[key_index]
-    key_index = (key_index + 1) % len(GEMINI_KEYS)
-    return key
-
-# ---------------- AI (صديقة داعمة مختصرة) ----------------
-def ai_reply(user_text):
-    system_prompt = """
-أنتِ صديقة قريبة وحكيمة.
-كلامك:
-- مختصر
-- صادق
-- بدون إيموجي
-- يوجّه للصح بهدوء
-
-قواعد:
-- 1 إلى 3 جمل فقط
-- لا وعظ
-- لا مبالغة
-- استخدمي صيغة المؤنث
-"""
-
-    prompt = f"""{system_prompt}
-
-كلام المستخدم:
-{user_text}
-
-رد الصديقة:
-"""
-
-    for _ in range(3):
-        try:
-            genai.configure(api_key=next_key())
-            model = genai.Model(MODEL_NAME)
-            response = model.generate(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=GEN_CONFIG["temperature"],
-                max_output_tokens=GEN_CONFIG["max_output_tokens"],
-                top_p=GEN_CONFIG["top_p"],
-                top_k=GEN_CONFIG["top_k"]
-            )
-            if response and response.output_text:
-                return re.sub(r"\s+", " ", response.output_text.strip())
-        except Exception:
-            time.sleep(0.3)
-
-    return "خلينا نوقف لحظة ونفكر بهدوء."
-
-# ---------------- QUEUE + WORKERS ----------------
-queue = Queue()
-
-def worker():
-    while True:
-        uid, text = queue.get()
-        try:
-            reply = ai_reply(text)
-
-            db = get_db()
-            db.execute(
-                "INSERT INTO chats VALUES(NULL, ?, 'assistant', ?, ?)",
-                (uid, reply, datetime.now().isoformat())
-            )
-            db.commit()
-            db.close()
-
-            with ApiClient(configuration) as api:
-                MessagingApi(api).push_message(
-                    PushMessageRequest(to=uid, messages=[TextMessage(text=reply)])
-                )
-        finally:
-            queue.task_done()
-
-for _ in range(3):
-    threading.Thread(target=worker, daemon=True).start()
-
-# ---------------- DAILY MESSAGES ----------------
-DAILY_MESSAGES = {
-    "تحفيز": [
-        "تذكري أن كل خطوة صغيرة تُقربك من هدفك.",
-        "ابدأي يومك بثقة، وركزي على ما يمكنك تغييره.",
-        "خذي نفسًا عميقًا قبل اتخاذ أي قرار مهم.",
-        "تقبلي نفسك كما أنت، فالتغيير يبدأ بالوعي.",
-        "كل تجربة تعلمك درسًا، لا تهجري التعلم."
-    ],
-    "ثقة": [
-        "ثقتك بنفسك هي أفضل بداية لأي يوم.",
-        "كل إنجاز يبدأ بخطوة صغيرة، صدقي نفسك.",
-        "قيمي نجاحك الداخلي قبل الخارجي.",
-        "أنتِ قوية بما يكفي لتجاوز كل تحدي.",
-        "الخطأ لا يقلل من قيمتك، بل يعلمك."
-    ],
-    "تمارين": [
-        "اليوم مارسي 5 دقائق تأمل قبل بدء مهامك.",
-        "اختاري مهمة واحدة صعبة وأكمليها.",
-        "دوّني 3 أشياء ممتنة لك قبل النوم.",
-        "جسديك يحتاج حركة، حاولي المشي 10 دقائق.",
-        "ركزي على تنفسك 3 دقائق لتصفية ذهنك."
-    ]
-}
-
-def send_daily_messages():
-    while True:
-        now = datetime.now()
-        if now.hour == 9 and now.minute == 0:
-            try:
-                db = get_db()
-                users = db.execute("SELECT user_id, daily_type FROM users").fetchall()
-                db.close()
-                for u in users:
-                    uid = u["user_id"]
-                    daily_type = u["daily_type"] or "تحفيز"
-                    msgs = DAILY_MESSAGES.get(daily_type, DAILY_MESSAGES["تحفيز"])
-                    msg = msgs[now.day % len(msgs)]
-                    queue.put((uid, msg))
-            except Exception as e:
-                logger.error(f"Daily message error: {e}")
-            time.sleep(60)
-        else:
-            time.sleep(30)
-
-threading.Thread(target=send_daily_messages, daemon=True).start()
-
-# ---------------- HANDLE DAILY TYPE COMMAND ----------------
-def handle_daily_type_command(uid, msg):
-    msg = msg.strip().lower()
-    type_map = {"تحفيز": "تحفيز", "ثقة": "ثقة", "تمارين": "تمارين"}
-    if msg in type_map:
-        db = get_db()
-        db.execute(
-            "UPDATE users SET daily_type=? WHERE user_id=?",
-            (type_map[msg], uid)
-        )
-        db.commit()
-        db.close()
-        return f"تم ضبط الرسائل اليومية على {type_map[msg]}"
-    return None
-
-# ---------------- LINE EVENTS ----------------
-@handler.add(FollowEvent)
-def follow(event):
-    with ApiClient(configuration) as api:
-        MessagingApi(api).push_message(
-            PushMessageRequest(
-                to=event.source.user_id,
-                messages=[TextMessage(text="أهلًا فيك. أنا هنا أسمعك وأساعدك.")]
-            )
-        )
-
-@handler.add(MessageEvent, message=TextMessageContent)
-def message(event):
-    uid = event.source.user_id
-    text = event.message.text.strip()
-    if not text or not rate_limiter.allow(uid):
-        return
-
-    # تحقق إذا المستخدم يغير نوع الرسائل اليومية
-    cmd_reply = handle_daily_type_command(uid, text)
-    if cmd_reply:
-        with ApiClient(configuration) as api:
-            MessagingApi(api).reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=cmd_reply)]
-                )
-            )
-        return
-
-    db = get_db()
-    today = datetime.now().date().isoformat()
-    row = db.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
-
-    if row:
-        if row["daily_reset"] != today:
-            db.execute(
-                "UPDATE users SET daily_count=1, daily_reset=? WHERE user_id=?",
-                (today, uid)
-            )
-        else:
-            db.execute(
-                "UPDATE users SET daily_count=daily_count+1 WHERE user_id=?",
-                (uid,)
-            )
-    else:
-        db.execute(
-            "INSERT INTO users VALUES (?, 1, ?, 'تحفيز')",
-            (uid, today)
-        )
-
-    db.execute(
-        "INSERT INTO chats VALUES(NULL, ?, 'user', ?, ?)",
-        (uid, text, datetime.now().isoformat())
-    )
-    db.commit()
-    db.close()
-
-    queue.put((uid, text))
-
-# ---------------- ROUTES ----------------
+# ==========================
+# نقطة النهاية للتأكد من السيرفر
+# ==========================
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "running"})
+    return "Server is running!", 200
 
+# ==========================
+# Webhook للرد على Line Messages
+# ==========================
 @app.route("/callback", methods=["POST"])
 def callback():
-    sig = request.headers.get("X-Line-Signature", "")
+    signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
-    try:
-        handler.handle(body, sig)
-    except InvalidSignatureError:
-        abort(400)
-    return "OK"
 
-# ---------------- RUN ----------------
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        return "Invalid signature", 400
+
+    return "OK", 200
+
+# ==========================
+# معالجة الرسائل من المستخدم
+# ==========================
+@handler.add_message("text")
+def handle_message(event):
+    user_message = event.message.text
+    response_text = generate_gemini_reply(user_message)
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=response_text)
+    )
+
+# ==========================
+# توليد رد من Gemini مع تبديل المفاتيح تلقائيًا
+# ==========================
+def generate_gemini_reply(prompt: str) -> str:
+    global current_key_index
+
+    for attempt in range(len(GEMINI_KEYS)):
+        try:
+            response = genai.ChatCompletion.create(
+                model="chat-bison-001",
+                messages=[
+                    {"role": "system", "content": "أنت صديقة داعمة، مختصرة، توجه المستخدم للصح."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_output_tokens=400
+            )
+            return response.candidates[0].content
+
+        except genai.errors.BadRequestError as e:
+            # إذا انتهى الحد اليومي للمفتاح، ننتقل للمفتاح التالي
+            current_key_index = (current_key_index + 1) % len(GEMINI_KEYS)
+            set_gemini_key()
+        except Exception as e:
+            print(f"Gemini error: {e}")
+            return "عذرًا، حدث خطأ أثناء توليد الرد."
+
+    return "عذرًا، جميع المفاتيح تجاوزت الحد اليومي."
+
+# ==========================
+# تشغيل السيرفر
+# ==========================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
