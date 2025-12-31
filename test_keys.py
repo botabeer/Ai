@@ -23,7 +23,7 @@ for i, key in enumerate(GEMINI_KEYS):
     
     try:
         genai.configure(api_key=key)
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
         response = model.generate_content(
             "مرحبا",
