@@ -1,102 +1,77 @@
+# app.py
 import os
+from flask import Flask, request, jsonify
+from google import genai
 import random
-from flask import Flask, request
-import google_genai as genai
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import TextSendMessage
+import time
 
 app = Flask(__name__)
 
-# =========================
-# مفاتيح Gemini (ضعها في .env)
-# =========================
+# ===== إعداد المفاتيح الثلاثة =====
 GEMINI_KEYS = [
-    os.environ.get("GEMINI_API_KEY_1"),
-    os.environ.get("GEMINI_API_KEY_2"),
-    os.environ.get("GEMINI_API_KEY_3")
+    os.getenv("GEMINI_KEY_1"),
+    os.getenv("GEMINI_KEY_2"),
+    os.getenv("GEMINI_KEY_3")
 ]
 
+if not all(GEMINI_KEYS):
+    raise Exception("⚠️ يجب تعيين جميع مفاتيح GEMINI_KEY_1, 2, 3 في Environment")
+
+# مؤشر المفتاح الحالي
 current_key_index = 0
 
-def set_gemini_key():
+# ===== دالة للحصول على المفتاح التالي =====
+def get_next_key():
     global current_key_index
     key = GEMINI_KEYS[current_key_index]
-    genai.configure(api_key=key)
+    current_key_index = (current_key_index + 1) % len(GEMINI_KEYS)
+    return key
 
-# تعيين أول مفتاح
-set_gemini_key()
+# ===== دالة إرسال الطلب إلى Gemini مع المحاولة التلقائية =====
+def send_to_gemini(prompt, max_retries=None):
+    if max_retries is None:
+        max_retries = len(GEMINI_KEYS)
+    
+    last_error = None
 
-# =========================
-# إعداد Line Bot
-# =========================
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+    for _ in range(max_retries):
+        api_key = get_next_key()
+        client = genai.Client(api_key=api_key)
+        try:
+            response = client.responses.create(
+                model="gemini-1.5",
+                input=prompt
+            )
+            return response.output_text
+        except Exception as e:
+            # إذا انتهى الحد اليومي أو أي خطأ، نحفظ الخطأ ونجرب المفتاح التالي
+            last_error = e
+            continue
 
-# =========================
-# Routes
-# =========================
-@app.route("/", methods=["GET"])
-def home():
-    return "Server is running!", 200
+    # إذا لم تنجح أي محاولة، نرجع الخطأ النهائي
+    raise last_error
 
-@app.route("/callback", methods=["POST"])
-def callback():
-    signature = request.headers.get("X-Line-Signature", "")
-    body = request.get_data(as_text=True)
+# ===== واجهة Chat =====
+@app.route("/chat", methods=["POST"])
+def chat():
+    data = request.json
+    prompt = data.get("prompt", "")
+    
+    if not prompt:
+        return jsonify({"error": "لا يوجد نص للإرسال"}), 400
 
     try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        return "Invalid signature", 400
+        answer = send_to_gemini(prompt)
+        return jsonify({"response": answer})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    return "OK", 200
+# ===== صفحة رئيسية =====
+@app.route("/", methods=["GET"])
+def index():
+    return "🔥 تطبيق Gemini جاهز ويعمل مع تبديل المفاتيح تلقائيًا!"
 
-# =========================
-# التعامل مع رسائل المستخدم
-# =========================
-@handler.add_message("text")
-def handle_message(event):
-    user_message = event.message.text
-    response_text = generate_gemini_reply(user_message)
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=response_text)
-    )
-
-# =========================
-# توليد الردود من Gemini
-# =========================
-def generate_gemini_reply(prompt: str) -> str:
-    global current_key_index
-    for attempt in range(len(GEMINI_KEYS)):
-        try:
-            response = genai.chat(
-                model="chat-bison-001",
-                messages=[
-                    {"role": "system", "content": "أنت صديقة داعمة، مختصرة، توجه المستخدم للصح."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_output_tokens=400
-            )
-            return response.candidates[0].content
-
-        except genai.errors.BadRequestError:
-            # إذا انتهى الحد اليومي للمفتاح
-            current_key_index = (current_key_index + 1) % len(GEMINI_KEYS)
-            set_gemini_key()
-        except Exception as e:
-            print(f"Gemini error: {e}")
-            return "عذرًا، حدث خطأ أثناء توليد الرد."
-
-    return "عذرًا، جميع المفاتيح تجاوزت الحد اليومي."
-
-# =========================
-# تشغيل السيرفر
-# =========================
+# ===== تشغيل التطبيق =====
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
