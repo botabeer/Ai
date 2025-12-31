@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: life-coach-bot
+    env: python
+    plan: free
+    startCommand: gunicorn app:app
