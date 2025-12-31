@@ -73,7 +73,7 @@ def get_active_gemini_client():
         
         try:
             genai.configure(api_key=GEMINI_KEYS[key_index])
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-1.5-flash-latest')
             
             # تحديث المفتاح النشط
             if key_index != current_index:
