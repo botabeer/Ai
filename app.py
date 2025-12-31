@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import warnings
 from datetime import datetime, timedelta
 from flask import Flask, request, abort, jsonify
 from linebot.v3 import WebhookHandler
@@ -15,13 +16,16 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, FollowEvent, UnfollowEvent
 from dotenv import load_dotenv
-import google.generativeai as genai
 import logging
 import time
 import threading
 import re
 from collections import defaultdict
 from queue import Queue
+
+# Suppress FutureWarning for google.generativeai
+warnings.filterwarnings('ignore', category=FutureWarning, module='google.generativeai')
+import google.generativeai as genai
 
 # Logging
 logging.basicConfig(
@@ -57,7 +61,7 @@ MAX_DAILY_MESSAGES = int(os.getenv("MAX_DAILY_MESSAGES", "100"))
 RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", "2"))
 
 BOT_NAME = "Smart Assistant"
-BOT_VERSION = "2.6"
+BOT_VERSION = "2.7"
 BOT_CREATOR = "عبير الدوسري"
 BOT_YEAR = "2025"
 
@@ -74,7 +78,7 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 DB_PATH = "chatbot.db"
 message_queue = Queue()
 
-# Simple DB connection without locks
+# Simple DB connection
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=10.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -115,7 +119,6 @@ class ModelManager:
     
     def mark_fail(self, combo):
         self.fails[combo] += 1
-        # Switch to next combination
         self.current_model = (self.current_model + 1) % len(self.models)
         if self.current_model == 0:
             self.current_key = (self.current_key + 1) % len(self.keys)
@@ -174,7 +177,7 @@ def init_db():
 
 init_db()
 
-# Database Functions - NO NESTED CALLS
+# Database Functions
 def get_user(user_id):
     try:
         conn = get_db()
@@ -194,7 +197,6 @@ def save_user(user_id):
         now = datetime.now().isoformat()
         today = datetime.now().date().isoformat()
         
-        # Check if user exists in single query
         c.execute("SELECT daily_reset, daily_count FROM users WHERE user_id=?", (user_id,))
         user = c.fetchone()
         
@@ -251,7 +253,6 @@ def get_history(user_id, limit=6):
         conn = get_db()
         c = conn.cursor()
         
-        # Clean old chats
         cutoff = (datetime.now() - timedelta(hours=48)).isoformat()
         c.execute("DELETE FROM chats WHERE user_id=? AND timestamp < ?", (user_id, cutoff))
         
@@ -379,7 +380,7 @@ def generate_response(user_msg, user_id):
     # Try generate
     max_attempts = len(GEMINI_KEYS) * len(GEMINI_MODELS)
     
-    for attempt in range(min(max_attempts, 6)):  # Max 6 attempts
+    for attempt in range(min(max_attempts, 6)):
         try:
             key, model, combo = model_manager.get_next()
             
