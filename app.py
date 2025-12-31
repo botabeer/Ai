@@ -14,8 +14,8 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, FollowEvent
 
-warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
-import google.generativeai as genai
+# المكتبة الجديدة
+from google import genai
 
 # ---------------- INIT ----------------
 load_dotenv()
@@ -61,7 +61,8 @@ def init_db():
     db.execute("""CREATE TABLE IF NOT EXISTS users(
         user_id TEXT PRIMARY KEY,
         daily_count INTEGER,
-        daily_reset TEXT
+        daily_reset TEXT,
+        daily_type TEXT DEFAULT 'تحفيز'
     )""")
     db.execute("""CREATE TABLE IF NOT EXISTS chats(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,14 +141,16 @@ def ai_reply(user_text):
     for _ in range(3):
         try:
             genai.configure(api_key=next_key())
-            model = genai.GenerativeModel(
-                MODEL_NAME,
-                generation_config=GEN_CONFIG,
-                safety_settings=SAFETY
+            model = genai.Model(MODEL_NAME)
+            response = model.generate(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=GEN_CONFIG["temperature"],
+                max_output_tokens=GEN_CONFIG["max_output_tokens"],
+                top_p=GEN_CONFIG["top_p"],
+                top_k=GEN_CONFIG["top_k"]
             )
-            res = model.generate_content(prompt, request_options={"timeout": 8})
-            if res and res.text:
-                return re.sub(r"\s+", " ", res.text.strip())
+            if response and response.output_text:
+                return re.sub(r"\s+", " ", response.output_text.strip())
         except Exception:
             time.sleep(0.3)
 
@@ -180,6 +183,68 @@ def worker():
 for _ in range(3):
     threading.Thread(target=worker, daemon=True).start()
 
+# ---------------- DAILY MESSAGES ----------------
+DAILY_MESSAGES = {
+    "تحفيز": [
+        "تذكري أن كل خطوة صغيرة تُقربك من هدفك.",
+        "ابدأي يومك بثقة، وركزي على ما يمكنك تغييره.",
+        "خذي نفسًا عميقًا قبل اتخاذ أي قرار مهم.",
+        "تقبلي نفسك كما أنت، فالتغيير يبدأ بالوعي.",
+        "كل تجربة تعلمك درسًا، لا تهجري التعلم."
+    ],
+    "ثقة": [
+        "ثقتك بنفسك هي أفضل بداية لأي يوم.",
+        "كل إنجاز يبدأ بخطوة صغيرة، صدقي نفسك.",
+        "قيمي نجاحك الداخلي قبل الخارجي.",
+        "أنتِ قوية بما يكفي لتجاوز كل تحدي.",
+        "الخطأ لا يقلل من قيمتك، بل يعلمك."
+    ],
+    "تمارين": [
+        "اليوم مارسي 5 دقائق تأمل قبل بدء مهامك.",
+        "اختاري مهمة واحدة صعبة وأكمليها.",
+        "دوّني 3 أشياء ممتنة لك قبل النوم.",
+        "جسديك يحتاج حركة، حاولي المشي 10 دقائق.",
+        "ركزي على تنفسك 3 دقائق لتصفية ذهنك."
+    ]
+}
+
+def send_daily_messages():
+    while True:
+        now = datetime.now()
+        if now.hour == 9 and now.minute == 0:
+            try:
+                db = get_db()
+                users = db.execute("SELECT user_id, daily_type FROM users").fetchall()
+                db.close()
+                for u in users:
+                    uid = u["user_id"]
+                    daily_type = u["daily_type"] or "تحفيز"
+                    msgs = DAILY_MESSAGES.get(daily_type, DAILY_MESSAGES["تحفيز"])
+                    msg = msgs[now.day % len(msgs)]
+                    queue.put((uid, msg))
+            except Exception as e:
+                logger.error(f"Daily message error: {e}")
+            time.sleep(60)
+        else:
+            time.sleep(30)
+
+threading.Thread(target=send_daily_messages, daemon=True).start()
+
+# ---------------- HANDLE DAILY TYPE COMMAND ----------------
+def handle_daily_type_command(uid, msg):
+    msg = msg.strip().lower()
+    type_map = {"تحفيز": "تحفيز", "ثقة": "ثقة", "تمارين": "تمارين"}
+    if msg in type_map:
+        db = get_db()
+        db.execute(
+            "UPDATE users SET daily_type=? WHERE user_id=?",
+            (type_map[msg], uid)
+        )
+        db.commit()
+        db.close()
+        return f"تم ضبط الرسائل اليومية على {type_map[msg]}"
+    return None
+
 # ---------------- LINE EVENTS ----------------
 @handler.add(FollowEvent)
 def follow(event):
@@ -196,6 +261,18 @@ def message(event):
     uid = event.source.user_id
     text = event.message.text.strip()
     if not text or not rate_limiter.allow(uid):
+        return
+
+    # تحقق إذا المستخدم يغير نوع الرسائل اليومية
+    cmd_reply = handle_daily_type_command(uid, text)
+    if cmd_reply:
+        with ApiClient(configuration) as api:
+            MessagingApi(api).reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=cmd_reply)]
+                )
+            )
         return
 
     db = get_db()
@@ -215,7 +292,7 @@ def message(event):
             )
     else:
         db.execute(
-            "INSERT INTO users VALUES (?, 1, ?)",
+            "INSERT INTO users VALUES (?, 1, ?, 'تحفيز')",
             (uid, today)
         )
 
@@ -226,7 +303,6 @@ def message(event):
     db.commit()
     db.close()
 
-    # ضع الرسالة في queue فقط (لا يوجد رد مؤقت)
     queue.put((uid, text))
 
 # ---------------- ROUTES ----------------
