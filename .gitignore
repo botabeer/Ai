@@ -1,9 +1,16 @@
+# Environment variables
+.env
+.env.local
+
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+env/
+venv/
+ENV/
 build/
 develop-eggs/
 dist/
@@ -20,24 +27,8 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual Environment
-venv/
-ENV/
-env/
-
-# Environment Variables
-.env
-.env.local
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
-chatbot.db
-
-# Logs
-*.log
-bot.log
+# Key status file
+key_status.json
 
 # IDE
 .vscode/
@@ -50,7 +41,5 @@ bot.log
 .DS_Store
 Thumbs.db
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
+# Logs
+*.log
