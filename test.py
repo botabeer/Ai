@@ -87,7 +87,7 @@ def test_gemini_keys():
         
         try:
             genai.configure(api_key=key)
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
+            model = genai.GenerativeModel('gemini-1.5-flash')
             
             response = model.generate_content(
                 "قل مرحبا",
@@ -149,10 +149,10 @@ def test_available_models():
         models = genai.list_models()
         
         recommended = [
-            'gemini-1.5-flash-latest',
             'gemini-1.5-flash',
-            'gemini-1.5-flash-8b-latest',
-            'gemini-1.5-pro-latest'
+            'gemini-1.5-flash-8b',
+            'gemini-1.5-pro',
+            'gemini-pro'
         ]
         
         print_info("النماذج الموصى بها:")
