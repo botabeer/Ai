@@ -351,13 +351,12 @@ def get_ai_response(user_id: str, message: str) -> str:
             genai.configure(api_key=key)
             
             model = genai.GenerativeModel(
-                'gemini-1.5-flash',
+                'gemini-1.5-flash-002',
                 generation_config=genai.types.GenerationConfig(
                     temperature=0.95,
                     top_p=0.95,
                     top_k=50,
                     max_output_tokens=250,
-                    candidate_count=1,
                 )
             )
             
