@@ -351,7 +351,7 @@ def get_ai_response(user_id: str, message: str) -> str:
             genai.configure(api_key=key)
             
             model = genai.GenerativeModel(
-                'gemini-1.5-flash-latest',
+                'gemini-1.5-flash',
                 generation_config=genai.types.GenerationConfig(
                     temperature=0.95,
                     top_p=0.95,
