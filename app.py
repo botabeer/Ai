@@ -1,17 +1,7 @@
 """
-🤖 Life Coach LINE Bot - Professional Edition
-================================================
-مدرب حياة ذكي متقدم مع ذاكرة، تحليل مشاعر، وتتبع تقدم
-
-Features:
-- نظام ذاكرة ذكي للمحادثات
-- تحليل المشاعر والحالة النفسية
-- تتبع الأهداف والتقدم
-- 3 مفاتيح API مع تبديل تلقائي ذكي
-- نظام cache للردود المتكررة
-- rate limiting ذكي
-- logging احترافي
-- معالجة متقدمة للأخطاء
+🤖 Life Coach LINE Bot - Professional Edition v2.0
+===================================================
+مدرب حياة ذكي متقدم مع تحسينات الأداء والاستقرار
 """
 
 from flask import Flask, request, abort, jsonify
@@ -19,19 +9,18 @@ from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     Configuration, ApiClient, MessagingApi,
-    ReplyMessageRequest, TextMessage, PushMessageRequest
+    ReplyMessageRequest, TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, FollowEvent
 import google.generativeai as genai
 import os
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
-from functools import wraps
-import json
 import hashlib
 import logging
 from typing import Dict, List, Optional, Tuple
 import time
+import re
 
 # ================== إعدادات Logging ==================
 logging.basicConfig(
@@ -51,6 +40,10 @@ app = Flask(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 
+if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
+    logger.error("❌ LINE credentials missing!")
+    raise ValueError("LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET must be set")
+
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
@@ -59,6 +52,19 @@ GEMINI_KEYS = [
     os.getenv('GEMINI_API_KEY_1'),
     os.getenv('GEMINI_API_KEY_2'),
     os.getenv('GEMINI_API_KEY_3')
+]
+GEMINI_KEYS = [k for k in GEMINI_KEYS if k and not k.startswith('your_')]
+
+if not GEMINI_KEYS:
+    logger.error("❌ No valid Gemini API keys found!")
+    raise ValueError("At least one GEMINI_API_KEY must be set")
+
+# ================== النماذج المتاحة (بالترتيب) ==================
+AVAILABLE_MODELS = [
+    'gemini-1.5-flash-002',
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-8b-latest',
+    'gemini-pro'
 ]
 
 # ================== الذاكرة والتخزين ==================
@@ -96,15 +102,6 @@ class UserMemory:
         
         return "\n".join(formatted)
     
-    def add_goal(self, user_id: str, goal: str):
-        """إضافة هدف للمستخدم"""
-        self.goals[user_id].append({
-            'goal': goal,
-            'created_at': datetime.now().isoformat(),
-            'status': 'active',
-            'progress': 0
-        })
-        
     def track_emotion(self, user_id: str, emotion: str, intensity: float):
         """تتبع المشاعر"""
         self.emotions[user_id].append({
@@ -112,13 +109,12 @@ class UserMemory:
             'intensity': intensity,
             'timestamp': datetime.now().isoformat()
         })
-        # احتفظ بآخر 20 حالة عاطفية فقط
         if len(self.emotions[user_id]) > 20:
             self.emotions[user_id] = self.emotions[user_id][-20:]
     
     def get_emotion_trend(self, user_id: str) -> str:
         """تحليل اتجاه المشاعر"""
-        recent = self.emotions[user_id][-5:]
+        recent = self.emotions[user_id][-5:] if user_id in self.emotions else []
         if not recent:
             return "محايد"
         
@@ -126,27 +122,20 @@ class UserMemory:
         emotions = [e['emotion'] for e in recent]
         
         if avg_intensity > 0.7:
-            return f"إيجابي جداً (غالب: {max(set(emotions), key=emotions.count)})"
+            return f"إيجابي جداً"
         elif avg_intensity > 0.4:
             return "إيجابي"
         elif avg_intensity > -0.2:
             return "محايد"
         else:
             return "يحتاج دعم"
-    
-    def should_check_in(self, user_id: str) -> bool:
-        """هل حان وقت الاطمئنان على المستخدم؟"""
-        last = self.last_interaction.get(user_id)
-        if not last:
-            return False
-        return (datetime.now() - last) > timedelta(days=3)
 
 # ================== إدارة المفاتيح الذكية ==================
 class SmartKeyManager:
     """إدارة ذكية لمفاتيح API"""
     
     def __init__(self, keys: List[str]):
-        self.keys = [k for k in keys if k and 'your_' not in k]
+        self.keys = keys
         self.current_index = 0
         self.key_stats = {i: {'calls': 0, 'errors': 0, 'last_reset': datetime.now()} 
                          for i in range(len(self.keys))}
@@ -155,11 +144,9 @@ class SmartKeyManager:
         
     def get_best_key(self) -> Tuple[str, int]:
         """اختيار أفضل مفتاح متاح"""
-        # إعادة تعيين يومياً
         if datetime.now() - self.last_reset > timedelta(days=1):
             self.reset_daily()
         
-        # جرب المفاتيح بالترتيب من الأقل استخداماً
         available = [(i, self.key_stats[i]['calls']) 
                     for i in range(len(self.keys)) 
                     if i not in self.failed_keys]
@@ -167,7 +154,6 @@ class SmartKeyManager:
         if not available:
             raise Exception("جميع المفاتيح مستنفذة")
         
-        # اختر المفتاح الأقل استخداماً
         best_index = min(available, key=lambda x: x[1])[0]
         return self.keys[best_index], best_index
     
@@ -196,13 +182,14 @@ class SmartKeyManager:
 class ResponseCache:
     """تخزين مؤقت للردود المتشابهة"""
     
-    def __init__(self, ttl: int = 3600):
+    def __init__(self, ttl: int = 1800):
         self.cache: Dict[str, Tuple[str, datetime]] = {}
         self.ttl = ttl
         
     def _hash_message(self, message: str) -> str:
         """إنشاء hash للرسالة"""
-        return hashlib.md5(message.lower().strip().encode()).hexdigest()
+        normalized = re.sub(r'\s+', ' ', message.lower().strip())
+        return hashlib.md5(normalized.encode()).hexdigest()
     
     def get(self, message: str) -> Optional[str]:
         """البحث في الـ cache"""
@@ -221,7 +208,6 @@ class ResponseCache:
         key = self._hash_message(message)
         self.cache[key] = (response, datetime.now())
         
-        # تنظيف الـ cache القديم
         if len(self.cache) > 100:
             old_keys = [k for k, (_, ts) in self.cache.items() 
                        if datetime.now() - ts > timedelta(seconds=self.ttl)]
@@ -232,7 +218,7 @@ class ResponseCache:
 class RateLimiter:
     """حماية من التكرار الزائد"""
     
-    def __init__(self, max_requests: int = 20, window: int = 60):
+    def __init__(self, max_requests: int = 30, window: int = 60):
         self.requests: Dict[str, deque] = defaultdict(lambda: deque(maxlen=max_requests))
         self.max_requests = max_requests
         self.window = window
@@ -242,7 +228,6 @@ class RateLimiter:
         now = time.time()
         user_requests = self.requests[user_id]
         
-        # إزالة الطلبات القديمة
         while user_requests and now - user_requests[0] > self.window:
             user_requests.popleft()
         
@@ -254,16 +239,18 @@ class RateLimiter:
 
 # ================== تحليل المشاعر ==================
 class EmotionAnalyzer:
-    """تحليل بسيط للمشاعر من النص"""
+    """تحليل المشاعر من النص"""
     
     POSITIVE_KEYWORDS = {
         'سعيد', 'فرح', 'ممتاز', 'رائع', 'جميل', 'محظوظ', 'متحمس', 
-        'متفائل', 'راضي', 'ممتن', 'فخور', 'نجحت', 'حققت', 'أحب'
+        'متفائل', 'راضي', 'ممتن', 'فخور', 'نجحت', 'حققت', 'أحب',
+        'حلو', 'مبسوط', 'مرتاح', 'مسرور', '😊', '😄', '❤️', '🎉'
     }
     
     NEGATIVE_KEYWORDS = {
         'حزين', 'تعب', 'ملل', 'زهق', 'قلق', 'خائف', 'متوتر', 'مكتئب',
-        'يائس', 'محبط', 'فاشل', 'صعب', 'مشكلة', 'أكره', 'ضايق'
+        'يائس', 'محبط', 'فاشل', 'صعب', 'مشكلة', 'أكره', 'ضايق', 'زعلان',
+        'مضايق', 'مش', 'مو', '😢', '😞', '😔', '💔'
     }
     
     @staticmethod
@@ -286,22 +273,47 @@ class EmotionAnalyzer:
 # ================== تهيئة الأنظمة ==================
 memory = UserMemory()
 key_manager = SmartKeyManager(GEMINI_KEYS)
-cache = ResponseCache(ttl=1800)  # 30 دقيقة
+cache = ResponseCache(ttl=1800)
 rate_limiter = RateLimiter(max_requests=30, window=60)
 emotion_analyzer = EmotionAnalyzer()
 
 # ================== AI Engine ==================
+def find_working_model(api_key: str) -> Optional[str]:
+    """البحث عن نموذج يعمل"""
+    genai.configure(api_key=api_key)
+    
+    for model_name in AVAILABLE_MODELS:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(
+                "Hi",
+                generation_config=genai.types.GenerationConfig(max_output_tokens=5)
+            )
+            logger.info(f"✅ النموذج {model_name} يعمل")
+            return model_name
+        except Exception as e:
+            if "404" not in str(e):
+                logger.warning(f"⚠️ النموذج {model_name}: {str(e)[:50]}")
+            continue
+    
+    return None
+
 def get_ai_response(user_id: str, message: str) -> str:
     """المحرك الذكي للردود"""
     
     # فحص Rate Limiting
     if not rate_limiter.is_allowed(user_id):
-        return "رسائلك سريعة جداً 😊 خذ نفس وارجع بعد دقيقة"
+        return "رسائلك سريعة جداً 😊 خذي نفس عميق وارجعي بعد دقيقة"
     
-    # فحص الـ Cache
-    cached = cache.get(message)
-    if cached:
-        return cached
+    # معالجة الرسائل الفارغة
+    if not message or len(message.strip()) < 2:
+        return "يبدو أن رسالتك فارغة. شاركيني أفكارك أو مشاعرك 💭"
+    
+    # فحص الـ Cache (فقط للرسائل القصيرة المتكررة)
+    if len(message) < 50:
+        cached = cache.get(message)
+        if cached:
+            return cached
     
     # تحليل المشاعر
     emotion, intensity = emotion_analyzer.analyze(message)
@@ -311,85 +323,100 @@ def get_ai_response(user_id: str, message: str) -> str:
     history = memory.get_conversation_history(user_id, limit=3)
     emotion_trend = memory.get_emotion_trend(user_id)
     
-    # System Prompt متقدم
-    system_prompt = f"""أنت "نور" - مدربة حياة شخصية ذكية وداعمة جداً.
+    # System Prompt محسّن
+    system_prompt = f"""أنت "نور" - مدربة حياة شخصية ذكية وداعمة.
 
-📊 معلومات عن المستخدم:
-- الحالة العاطفية الحالية: {emotion} ({intensity:.1f})
+📊 حالة المستخدم:
+- المشاعر الحالية: {emotion} ({intensity:.1f})
 - الاتجاه العام: {emotion_trend}
-- آخر محادثة: {memory.last_interaction.get(user_id, 'أول مرة')}
 
-💬 محادثات سابقة:
+💬 آخر 3 رسائل:
 {history}
 
 🎯 شخصيتك:
-- صديقة مقربة، دافئة ومتفهمة
+- صديقة مقربة، دافئة ومتفهمة جداً
 - تجمعين بين الحكمة والتحفيز
 - ردودك 2-4 جمل، مباشرة وقوية
-- لا تستخدمين إيموجي أبداً
+- لا تستخدمين إيموجي إلا نادراً
 - تسألين أسئلة عميقة عندما يحتاج الموقف
-- تتذكرين السياق والمحادثات السابقة
+- تتذكرين السياق دائماً
 
 🧠 نهجك:
-1. إذا كان حزيناً: استمعي بعمق وقدمي دعماً حقيقياً
-2. إذا كان متحمساً: شاركيه الفرح وادفعيه للأمام
-3. إذا كان محايداً: كوني داعمة وإيجابية
-4. دائماً: كوني صادقة، محفزة، وعملية
+1. استمعي بعمق وتفهمي المشاعر
+2. قدمي دعماً حقيقياً وعملياً
+3. كوني صادقة ومحفزة
+4. تجنبي الكليشيهات والتكرار
 
-⚠️ مهم:
-- لا تكرري نفس العبارات
-- تجنبي الكليشيهات
+⚠️ قواعد مهمة:
+- الرد بالعربية فقط
 - كوني أصيلة وإنسانية
-- الرد بالعربية فقط"""
+- لا تكرري نفس العبارات
+- ركزي على المستخدم لا على نفسك"""
 
     # المحاولة مع التبديل التلقائي
     max_retries = len(key_manager.keys)
+    working_model = None
     
     for attempt in range(max_retries):
         try:
             key, key_index = key_manager.get_best_key()
-            genai.configure(api_key=key)
             
+            # إيجاد نموذج يعمل إذا لم نجد بعد
+            if not working_model:
+                working_model = find_working_model(key)
+                if not working_model:
+                    raise Exception("لا توجد نماذج متاحة")
+            
+            genai.configure(api_key=key)
             model = genai.GenerativeModel(
-                'gemini-1.5-flash-002',
+                working_model,
                 generation_config=genai.types.GenerationConfig(
-                    temperature=0.95,
+                    temperature=0.9,
                     top_p=0.95,
-                    top_k=50,
-                    max_output_tokens=250,
+                    top_k=40,
+                    max_output_tokens=300,
                 )
             )
             
             response = model.generate_content(
-                f"{system_prompt}\n\nالرسالة الحالية: {message}\n\nردك:"
+                f"{system_prompt}\n\nالرسالة: {message}\n\nردك:"
             )
             
             reply = response.text.strip()
+            
+            # إزالة أي نص غير مرغوب
+            reply = re.sub(r'\*\*.*?\*\*', '', reply)  # إزالة bold
+            reply = re.sub(r'\n{3,}', '\n\n', reply)  # تقليل الأسطر الفارغة
             
             # حفظ في الذاكرة
             memory.add_message(user_id, 'user', message, emotion)
             memory.add_message(user_id, 'assistant', reply)
             
-            # حفظ في الـ Cache
-            cache.set(message, reply)
+            # حفظ في الـ Cache (فقط للرسائل القصيرة)
+            if len(message) < 50:
+                cache.set(message, reply)
             
             # تسجيل النجاح
             key_manager.mark_success(key_index)
-            logger.info(f"✅ رد ناجح | مفتاح: {key_index+1} | مشاعر: {emotion}")
+            logger.info(f"✅ رد ناجح | مفتاح: {key_index+1} | نموذج: {working_model} | مشاعر: {emotion}")
             
             return reply
             
         except Exception as e:
             error_msg = str(e).lower()
-            is_quota = any(word in error_msg for word in ['quota', 'limit', 'resource'])
+            is_quota = any(word in error_msg for word in ['quota', 'limit', 'resource', 'exhausted'])
             
             key_manager.mark_failure(key_index, is_quota)
-            logger.error(f"❌ خطأ في محاولة {attempt+1}: {e}")
+            logger.error(f"❌ خطأ في محاولة {attempt+1}/{max_retries}: {str(e)[:100]}")
+            
+            if "404" in error_msg:
+                working_model = None  # جرب نموذج آخر
             
             if attempt < max_retries - 1:
+                time.sleep(0.5)  # انتظار قصير قبل المحاولة التالية
                 continue
             else:
-                return "عذراً، الخدمة مشغولة حالياً 💭 دعيني أستريح قليلاً وارجعي بعد دقائق"
+                return "عذراً، الخدمة مشغولة حالياً 💭 جربي مرة أخرى بعد دقيقة"
     
     return "أعتذر، لا أستطيع الرد الآن. حاولي لاحقاً ❤️"
 
@@ -418,12 +445,10 @@ def handle_message(event):
         user_id = event.source.user_id
         message = event.message.text.strip()
         
-        logger.info(f"📨 رسالة من {user_id[:8]}...: {message[:50]}")
+        logger.info(f"📨 [{user_id[:8]}]: {message[:50]}")
         
-        # الحصول على الرد
         reply = get_ai_response(user_id, message)
         
-        # إرسال الرد
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.reply_message(
@@ -433,7 +458,7 @@ def handle_message(event):
                 )
             )
         
-        logger.info(f"✅ تم الرد بنجاح على {user_id[:8]}...")
+        logger.info(f"✅ رد مرسل لـ {user_id[:8]}")
         
     except Exception as e:
         logger.error(f"❌ خطأ في handle_message: {e}")
@@ -443,7 +468,7 @@ def handle_message(event):
                 line_bot_api.reply_message(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[TextMessage(text="عذراً، حصل خطأ مؤقت. جربي مرة ثانية")]
+                        messages=[TextMessage(text="عذراً، حصل خطأ. جربي مرة ثانية 🌸")]
                     )
                 )
         except:
@@ -455,11 +480,10 @@ def handle_follow(event):
     user_id = event.source.user_id
     logger.info(f"🎉 متابع جديد: {user_id}")
     
-    welcome_message = """مرحباً! أنا نور، مدربة حياتك الشخصية 🌟
+    welcome = """مرحباً! أنا نور، مدربتك الشخصية 🌟
 
-أنا هنا لأدعمك، أسمعك، وأساعدك تحققين أهدافك.
-
-شاركيني أي شيء في بالك، وخليني أكون معك في رحلتك."""
+أنا هنا لأدعمك في رحلتك.
+شاركيني أي شيء في بالك، وخليني أكون معك."""
     
     try:
         with ApiClient(configuration) as api_client:
@@ -467,24 +491,24 @@ def handle_follow(event):
             line_bot_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
-                    messages=[TextMessage(text=welcome_message)]
+                    messages=[TextMessage(text=welcome)]
                 )
             )
     except Exception as e:
-        logger.error(f"خطأ في رسالة الترحيب: {e}")
+        logger.error(f"خطأ في الترحيب: {e}")
 
 # ================== نقاط النهاية ==================
 @app.route("/", methods=['GET'])
 def home():
     """الصفحة الرئيسية"""
-    stats = {
+    return jsonify({
         'status': 'running',
+        'bot': 'Life Coach Pro v2.0',
         'active_users': len(memory.conversations),
         'total_messages': sum(len(conv) for conv in memory.conversations.values()),
-        'cache_size': len(cache.cache),
-        'available_keys': len(key_manager.keys) - len(key_manager.failed_keys)
-    }
-    return jsonify(stats)
+        'available_keys': len(key_manager.keys) - len(key_manager.failed_keys),
+        'cache_size': len(cache.cache)
+    })
 
 @app.route("/health", methods=['GET'])
 def health():
@@ -496,21 +520,22 @@ def health():
 
 @app.route("/stats", methods=['GET'])
 def stats():
-    """إحصائيات متقدمة"""
+    """إحصائيات"""
     return jsonify({
         'users': len(memory.conversations),
         'messages': sum(len(conv) for conv in memory.conversations.values()),
-        'goals_tracked': sum(len(goals) for goals in memory.goals.values()),
-        'cache_hit_rate': f"{len(cache.cache)}/100",
-        'key_usage': {f"key_{i+1}": stats['calls'] 
-                     for i, stats in key_manager.key_stats.items()},
-        'failed_keys': len(key_manager.failed_keys)
+        'cache_hits': len(cache.cache),
+        'failed_keys': len(key_manager.failed_keys),
+        'key_stats': {f"key_{i+1}": {
+            'calls': s['calls'],
+            'errors': s['errors']
+        } for i, s in key_manager.key_stats.items()}
     })
 
 # ================== التشغيل ==================
 if __name__ == "__main__":
-    logger.info("🚀 بدء تشغيل Life Coach Bot Pro")
-    logger.info(f"📊 مفاتيح API متاحة: {len(key_manager.keys)}")
+    logger.info("🚀 Life Coach Bot Pro v2.0")
+    logger.info(f"📊 مفاتيح API: {len(key_manager.keys)}")
     
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
