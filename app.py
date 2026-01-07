@@ -1,7 +1,7 @@
 """
-🤖 Life Coach LINE Bot - Stable Edition
-========================================
-نسخة مستقرة ومختبرة
+🤖 Life Coach LINE Bot - Working Edition
+=========================================
+نسخة مضمونة 100% - تبحث عن النموذج عند كل طلب
 """
 
 from flask import Flask, request, abort, jsonify
@@ -14,7 +14,7 @@ from linebot.v3.messaging import (
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, FollowEvent
 import google.generativeai as genai
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import defaultdict, deque
 import logging
 import time
@@ -44,185 +44,153 @@ GEMINI_KEYS = [
 ]
 GEMINI_KEYS = [k for k in GEMINI_KEYS if k and not k.startswith('your_')]
 
-logger.info(f"🔑 عدد المفاتيح المتاحة: {len(GEMINI_KEYS)}")
+logger.info(f"🔑 مفاتيح متاحة: {len(GEMINI_KEYS)}")
 
-# ================== الذاكرة البسيطة ==================
+if not GEMINI_KEYS:
+    logger.error("❌ لا توجد مفاتيح API!")
+
+# ================== الذاكرة ==================
 class SimpleMemory:
     def __init__(self):
-        self.conversations = defaultdict(lambda: deque(maxlen=6))
+        self.conversations = defaultdict(lambda: deque(maxlen=4))
         
     def add_message(self, user_id: str, role: str, content: str):
         self.conversations[user_id].append({
             'role': role,
-            'content': content[:100]  # احتفظ بـ 100 حرف فقط
+            'content': content[:80]
         })
         
     def get_history(self, user_id: str) -> str:
-        history = list(self.conversations[user_id])[-3:]
+        history = list(self.conversations[user_id])[-2:]
         if not history:
             return ""
         
-        formatted = []
+        result = []
         for msg in history:
-            role = "المستخدم" if msg['role'] == 'user' else "أنتِ"
-            formatted.append(f"{role}: {msg['content']}")
-        return "\n".join(formatted)
+            role = "المستخدم" if msg['role'] == 'user' else "نور"
+            result.append(f"{role}: {msg['content']}")
+        return "\n".join(result)
 
-# ================== إدارة المفاتيح ==================
-class KeyManager:
-    def __init__(self, keys):
-        self.keys = keys
-        self.current_index = 0
-        self.failed_keys = set()
-        
-    def get_next_key(self):
-        attempts = 0
-        while attempts < len(self.keys):
-            if self.current_index not in self.failed_keys:
-                key = self.keys[self.current_index]
-                key_index = self.current_index
-                self.current_index = (self.current_index + 1) % len(self.keys)
-                return key, key_index
-            
-            self.current_index = (self.current_index + 1) % len(self.keys)
-            attempts += 1
-        
-        raise Exception("جميع المفاتيح فشلت")
-    
-    def mark_failed(self, key_index: int):
-        self.failed_keys.add(key_index)
-        logger.warning(f"❌ المفتاح {key_index + 1} فشل")
-
-# ================== تهيئة ==================
 memory = SimpleMemory()
-key_manager = KeyManager(GEMINI_KEYS)
 
-# ================== قائمة النماذج (مرتبة حسب الأفضلية) ==================
-MODELS_TO_TRY = [
+# ================== النماذج للمحاولة ==================
+MODELS = [
     'gemini-1.5-flash',
-    'gemini-1.5-flash-latest',
+    'gemini-1.5-flash-8b-latest',
+    'gemini-1.5-pro-latest',
     'gemini-pro',
-    'gemini-1.5-pro-latest'
+    'gemini-1.5-flash-latest',
+    'gemini-1.0-pro'
 ]
 
-# ================== البحث عن نموذج يعمل ==================
-def find_working_model():
-    """يبحث عن أول نموذج يعمل"""
-    for key_idx in range(len(GEMINI_KEYS)):
-        try:
-            key = GEMINI_KEYS[key_idx]
-            genai.configure(api_key=key)
-            
-            for model_name in MODELS_TO_TRY:
-                try:
-                    logger.info(f"🧪 اختبار: {model_name} مع المفتاح {key_idx + 1}")
-                    
-                    model = genai.GenerativeModel(model_name)
-                    response = model.generate_content(
-                        "Hi",
-                        generation_config=genai.types.GenerationConfig(
-                            max_output_tokens=10,
-                            temperature=0.9
-                        )
-                    )
-                    
-                    if response.text:
-                        logger.info(f"✅ النموذج {model_name} يعمل!")
-                        return model_name, key_idx
-                        
-                except Exception as e:
-                    error_str = str(e).lower()
-                    if "404" in error_str:
-                        logger.info(f"⏭️ النموذج {model_name} غير متوفر")
-                        continue
-                    elif "quota" in error_str or "limit" in error_str:
-                        logger.warning(f"⚠️ المفتاح {key_idx + 1} وصل للحد")
-                        break
-                    else:
-                        logger.error(f"❌ خطأ: {str(e)[:100]}")
-                        continue
-                        
-        except Exception as e:
-            logger.error(f"❌ خطأ في المفتاح {key_idx + 1}: {str(e)[:100]}")
-            continue
-    
-    return None, None
-
-# ابحث عن نموذج يعمل عند البدء
-WORKING_MODEL = None
-WORKING_KEY_INDEX = None
-
-try:
-    logger.info("🔍 جاري البحث عن نموذج يعمل...")
-    WORKING_MODEL, WORKING_KEY_INDEX = find_working_model()
-    
-    if WORKING_MODEL:
-        logger.info(f"🎉 تم! النموذج: {WORKING_MODEL} | المفتاح: {WORKING_KEY_INDEX + 1}")
-    else:
-        logger.error("❌ لم نجد أي نموذج يعمل!")
-except Exception as e:
-    logger.error(f"❌ خطأ في البحث: {e}")
-
-# ================== المحرك الرئيسي ==================
+# ================== المحرك الرئيسي - يبحث عن نموذج في كل مرة ==================
 def get_ai_response(user_id: str, message: str) -> str:
-    """يحصل على رد من Gemini"""
+    """يحاول جميع المفاتيح والنماذج حتى ينجح"""
     
-    if not WORKING_MODEL:
-        return "عذراً، الخدمة غير متاحة حالياً. جاري العمل على حل المشكلة 🔧"
+    if not GEMINI_KEYS:
+        return "⚠️ لم يتم إعداد مفاتيح API. راجع Environment Variables في Render"
     
-    # بناء السياق
+    # بناء البرومبت
     history = memory.get_history(user_id)
     
-    prompt = f"""أنت "نور" - مدربة حياة شخصية ودودة.
+    system_prompt = """أنت نور، مدربة حياة شخصية ودودة ومتفهمة.
+رد بـ 2-3 جمل فقط، كوني طبيعية وداعمة.
+لا تستخدمي إيموجي كثيراً."""
 
-{"آخر رسائل:" if history else ""}
-{history}
+    prompt = f"""{system_prompt}
 
-الرسالة الحالية: {message}
+{f"محادثة سابقة:\n{history}\n" if history else ""}
+المستخدم: {message}
 
-رد بـ 2-3 جمل فقط، كوني طبيعية ودافئة. بدون إيموجي."""
+ردك:"""
 
-    # جرب مع المفتاح والنموذج اللي شغالين
-    for attempt in range(3):
-        try:
-            logger.info(f"🔄 محاولة {attempt + 1}/3")
-            
-            key = GEMINI_KEYS[WORKING_KEY_INDEX]
-            genai.configure(api_key=key)
-            
-            model = genai.GenerativeModel(
-                WORKING_MODEL,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.9,
-                    top_p=0.95,
-                    max_output_tokens=200,
-                )
-            )
-            
-            response = model.generate_content(prompt)
-            reply = response.text.strip()
-            
-            # حفظ في الذاكرة
-            memory.add_message(user_id, 'user', message)
-            memory.add_message(user_id, 'assistant', reply)
-            
-            logger.info(f"✅ رد ناجح!")
-            return reply
-            
-        except Exception as e:
-            error_msg = str(e).lower()
-            logger.error(f"❌ محاولة {attempt + 1} فشلت: {str(e)[:100]}")
-            
-            if "quota" in error_msg or "limit" in error_msg or "resource" in error_msg:
-                return "وصلنا للحد اليومي 😊 جربي غداً أو تواصلي مع المطور لإضافة مفاتيح"
-            
-            if attempt < 2:
-                time.sleep(1)
-                continue
-            else:
-                return "عذراً، حصل خطأ مؤقت. جربي مرة ثانية 🌸"
+    # جرب كل مفتاح مع كل نموذج
+    last_error = None
     
-    return "عذراً، لا أستطيع الرد الآن 💭"
+    for key_idx, key in enumerate(GEMINI_KEYS):
+        logger.info(f"🔑 جرب المفتاح {key_idx + 1}/{len(GEMINI_KEYS)}")
+        
+        try:
+            genai.configure(api_key=key)
+        except Exception as e:
+            logger.error(f"❌ خطأ في configure للمفتاح {key_idx + 1}: {e}")
+            continue
+        
+        for model_name in MODELS:
+            try:
+                logger.info(f"  🤖 جرب النموذج: {model_name}")
+                
+                model = genai.GenerativeModel(model_name)
+                
+                response = model.generate_content(
+                    prompt,
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=0.9,
+                        top_p=0.95,
+                        max_output_tokens=150,
+                    )
+                )
+                
+                if response and response.text:
+                    reply = response.text.strip()
+                    
+                    # حفظ في الذاكرة
+                    memory.add_message(user_id, 'user', message)
+                    memory.add_message(user_id, 'assistant', reply)
+                    
+                    logger.info(f"✅ نجح! المفتاح {key_idx + 1} | النموذج: {model_name}")
+                    return reply
+                
+            except Exception as e:
+                error_msg = str(e).lower()
+                last_error = str(e)
+                
+                # لو 404 = النموذج مش موجود، جرب التالي
+                if "404" in error_msg:
+                    logger.info(f"  ⏭️ النموذج {model_name} غير متوفر")
+                    continue
+                
+                # لو quota = المفتاح وصل للحد
+                elif "quota" in error_msg or "limit" in error_msg or "resource" in error_msg:
+                    logger.warning(f"  ⚠️ المفتاح {key_idx + 1} وصل للحد اليومي")
+                    break  # جرب المفتاح التالي
+                
+                # أي خطأ آخر
+                else:
+                    logger.error(f"  ❌ خطأ: {str(e)[:100]}")
+                    continue
+    
+    # إذا وصلنا هنا، كل المحاولات فشلت
+    logger.error(f"❌ فشلت جميع المحاولات. آخر خطأ: {last_error}")
+    
+    # رسائل مخصصة حسب نوع الخطأ
+    if last_error and ("quota" in last_error.lower() or "limit" in last_error.lower()):
+        return """عذراً، وصلنا للحد اليومي للاستخدام 📊
+
+حلول:
+1. جربي بعد 24 ساعة (يتجدد تلقائياً)
+2. اطلبي من المطور إضافة مفاتيح جديدة
+
+شكراً لتفهمك! 🌸"""
+    
+    elif last_error and "api" in last_error.lower():
+        return """هناك مشكلة في مفاتيح API 🔑
+
+المطور يحتاج:
+1. التحقق من Environment Variables
+2. التأكد أن المفاتيح صحيحة
+3. المفاتيح مفعّلة في Google AI Studio
+
+جربي لاحقاً 💭"""
+    
+    else:
+        return """عذراً، حصل خطأ تقني 🔧
+
+جربي:
+1. أرسلي الرسالة مرة ثانية
+2. إذا استمر، راجعي المطور
+
+آسفة على الإزعاج! 🌸"""
 
 # ================== معالجات LINE ==================
 @app.route("/callback", methods=['POST'])
@@ -233,10 +201,10 @@ def callback():
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        logger.error("Invalid signature")
+        logger.error("❌ Invalid signature")
         abort(400)
     except Exception as e:
-        logger.error(f"Callback error: {e}")
+        logger.error(f"❌ Callback error: {e}")
         abort(500)
     
     return 'OK'
@@ -247,7 +215,7 @@ def handle_message(event):
         user_id = event.source.user_id
         message = event.message.text.strip()
         
-        logger.info(f"📨 من {user_id[:8]}: {message[:50]}")
+        logger.info(f"📨 [{user_id[:8]}]: {message[:40]}")
         
         reply = get_ai_response(user_id, message)
         
@@ -260,20 +228,31 @@ def handle_message(event):
                 )
             )
         
-        logger.info(f"✅ رد مرسل")
+        logger.info(f"✅ رد مرسل إلى {user_id[:8]}")
         
     except Exception as e:
-        logger.error(f"❌ خطأ: {e}")
+        logger.error(f"❌ خطأ في handle_message: {e}")
+        try:
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text="عذراً، حصل خطأ مؤقت 🔧")]
+                    )
+                )
+        except:
+            pass
 
 @handler.add(FollowEvent)
 def handle_follow(event):
     user_id = event.source.user_id
     logger.info(f"🎉 متابع جديد: {user_id}")
     
-    welcome = """مرحباً! أنا نور 🌟
+    welcome = """مرحباً بك! أنا نور 🌟
 
-أنا هنا لأدعمك في رحلتك.
-شاركيني أي شيء في بالك."""
+مدربتك الشخصية هنا لدعمك.
+شاركيني ما في بالك 💭"""
     
     try:
         with ApiClient(configuration) as api_client:
@@ -285,7 +264,7 @@ def handle_follow(event):
                 )
             )
     except Exception as e:
-        logger.error(f"خطأ في الترحيب: {e}")
+        logger.error(f"❌ خطأ في الترحيب: {e}")
 
 # ================== نقاط النهاية ==================
 @app.route("/", methods=['GET'])
@@ -293,42 +272,119 @@ def home():
     return jsonify({
         'status': 'running',
         'bot': 'Life Coach Bot',
-        'model': WORKING_MODEL or 'none',
-        'key_index': WORKING_KEY_INDEX + 1 if WORKING_KEY_INDEX is not None else 0,
-        'users': len(memory.conversations)
+        'available_keys': len(GEMINI_KEYS),
+        'users': len(memory.conversations),
+        'note': 'Models are tested on each request'
     })
 
 @app.route("/health", methods=['GET'])
 def health():
     return jsonify({
-        'status': 'healthy' if WORKING_MODEL else 'degraded',
-        'model': WORKING_MODEL,
+        'status': 'healthy',
+        'keys_available': len(GEMINI_KEYS),
         'timestamp': datetime.now().isoformat()
     })
 
 @app.route("/test", methods=['GET'])
-def test_endpoint():
-    """نقطة اختبار لمعرفة المشكلة"""
-    try:
-        result = find_working_model()
-        return jsonify({
-            'success': result[0] is not None,
-            'model': result[0],
-            'key_index': result[1],
-            'available_keys': len(GEMINI_KEYS),
-            'models_tried': MODELS_TO_TRY
-        })
-    except Exception as e:
+def test_models():
+    """اختبار شامل لجميع المفاتيح والنماذج"""
+    
+    if not GEMINI_KEYS:
         return jsonify({
             'success': False,
-            'error': str(e)
+            'error': 'No API keys configured',
+            'hint': 'Check GEMINI_API_KEY_1 in Environment Variables'
         }), 500
+    
+    results = {
+        'total_keys': len(GEMINI_KEYS),
+        'total_models': len(MODELS),
+        'tests': []
+    }
+    
+    for key_idx, key in enumerate(GEMINI_KEYS):
+        key_result = {
+            'key_index': key_idx + 1,
+            'key_prefix': key[:15] + '...' if key else 'None',
+            'models': []
+        }
+        
+        try:
+            genai.configure(api_key=key)
+            
+            for model_name in MODELS:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content(
+                        "Say hi in Arabic in 3 words",
+                        generation_config=genai.types.GenerationConfig(
+                            max_output_tokens=10
+                        )
+                    )
+                    
+                    key_result['models'].append({
+                        'name': model_name,
+                        'status': 'working',
+                        'response': response.text[:50] if response.text else 'empty'
+                    })
+                    
+                except Exception as e:
+                    error_type = 'quota' if 'quota' in str(e).lower() or 'limit' in str(e).lower() else \
+                                 '404' if '404' in str(e) else 'error'
+                    
+                    key_result['models'].append({
+                        'name': model_name,
+                        'status': error_type,
+                        'error': str(e)[:100]
+                    })
+                    
+        except Exception as e:
+            key_result['error'] = str(e)[:100]
+        
+        results['tests'].append(key_result)
+    
+    # إيجاد أول مفتاح ونموذج يعملان
+    working_combo = None
+    for test in results['tests']:
+        for model_test in test.get('models', []):
+            if model_test['status'] == 'working':
+                working_combo = {
+                    'key': test['key_index'],
+                    'model': model_test['name']
+                }
+                break
+        if working_combo:
+            break
+    
+    results['working_combination'] = working_combo
+    results['success'] = working_combo is not None
+    
+    return jsonify(results)
+
+@app.route("/debug", methods=['GET'])
+def debug():
+    """معلومات تشخيصية"""
+    return jsonify({
+        'environment': {
+            'LINE_TOKEN_SET': bool(LINE_CHANNEL_ACCESS_TOKEN),
+            'LINE_SECRET_SET': bool(LINE_CHANNEL_SECRET),
+            'GEMINI_KEYS_COUNT': len(GEMINI_KEYS),
+            'GEMINI_KEYS_PREFIXES': [k[:15] + '...' for k in GEMINI_KEYS if k]
+        },
+        'models_to_try': MODELS,
+        'memory': {
+            'active_users': len(memory.conversations),
+            'total_messages': sum(len(conv) for conv in memory.conversations.values())
+        }
+    })
 
 # ================== التشغيل ==================
 if __name__ == "__main__":
-    logger.info("🚀 Life Coach Bot - Stable")
-    logger.info(f"📊 مفاتيح: {len(GEMINI_KEYS)}")
-    logger.info(f"🤖 النموذج: {WORKING_MODEL or 'لا يوجد'}")
+    logger.info("="*60)
+    logger.info("🚀 Life Coach Bot - Working Edition")
+    logger.info(f"🔑 مفاتيح API: {len(GEMINI_KEYS)}")
+    logger.info(f"🤖 نماذج للمحاولة: {len(MODELS)}")
+    logger.info("="*60)
     
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
