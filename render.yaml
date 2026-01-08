@@ -3,4 +3,11 @@ services:
     name: life-coach-bot
     env: python
     plan: free
-    startCommand: gunicorn app:app
+    # إعدادات محسّنة للاستقرار
+    healthCheckPath: /health
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 120 --log-level info
+    
+    # متغيرات البيئة (ضعها في Render Dashboard)
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
