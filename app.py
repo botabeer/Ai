@@ -1,7 +1,7 @@
 """
-🤖 Life Coach LINE Bot - Working Edition
+🤖 Life Coach LINE Bot - FIXED VERSION
 =========================================
-نسخة مضمونة 100% - تبحث عن النموذج عند كل طلب
+✅ أسماء النماذج الصحيحة لـ 2026
 """
 
 from flask import Flask, request, abort, jsonify
@@ -17,7 +17,6 @@ import os
 from datetime import datetime
 from collections import defaultdict, deque
 import logging
-import time
 
 # ================== Logging ==================
 logging.basicConfig(
@@ -46,9 +45,6 @@ GEMINI_KEYS = [k for k in GEMINI_KEYS if k and not k.startswith('your_')]
 
 logger.info(f"🔑 مفاتيح متاحة: {len(GEMINI_KEYS)}")
 
-if not GEMINI_KEYS:
-    logger.error("❌ لا توجد مفاتيح API!")
-
 # ================== الذاكرة ==================
 class SimpleMemory:
     def __init__(self):
@@ -73,29 +69,28 @@ class SimpleMemory:
 
 memory = SimpleMemory()
 
-# ================== النماذج للمحاولة ==================
+# ================== النماذج الصحيحة لـ 2026 ==================
+# ⚠️ هذه الأسماء الصحيحة المدعومة حالياً
 MODELS = [
-    'gemini-1.5-flash',
-    'gemini-1.5-flash-8b-latest',
-    'gemini-1.5-pro-latest',
-    'gemini-pro',
-    'gemini-1.5-flash-latest',
-    'gemini-1.0-pro'
+    'gemini-1.5-flash-002',      # الأحدث والأسرع
+    'gemini-1.5-flash-001',      # بديل مستقر
+    'gemini-1.5-flash',          # النسخة العامة
+    'gemini-1.5-pro-002',        # الأقوى
+    'gemini-1.5-pro-001',        # بديل Pro
 ]
 
-# ================== المحرك الرئيسي - يبحث عن نموذج في كل مرة ==================
+# ================== المحرك الرئيسي ==================
 def get_ai_response(user_id: str, message: str) -> str:
     """يحاول جميع المفاتيح والنماذج حتى ينجح"""
     
     if not GEMINI_KEYS:
-        return "⚠️ لم يتم إعداد مفاتيح API. راجع Environment Variables في Render"
+        return "⚠️ لم يتم إعداد مفاتيح API"
     
     # بناء البرومبت
     history = memory.get_history(user_id)
     
     system_prompt = """أنت نور، مدربة حياة شخصية ودودة ومتفهمة.
-رد بـ 2-3 جمل فقط، كوني طبيعية وداعمة.
-لا تستخدمي إيموجي كثيراً."""
+رد بـ 2-3 جمل فقط، كوني طبيعية وداعمة."""
 
     prompt = f"""{system_prompt}
 
@@ -146,7 +141,7 @@ def get_ai_response(user_id: str, message: str) -> str:
                 last_error = str(e)
                 
                 # لو 404 = النموذج مش موجود، جرب التالي
-                if "404" in error_msg:
+                if "404" in error_msg or "not found" in error_msg:
                     logger.info(f"  ⏭️ النموذج {model_name} غير متوفر")
                     continue
                 
@@ -165,21 +160,20 @@ def get_ai_response(user_id: str, message: str) -> str:
     
     # رسائل مخصصة حسب نوع الخطأ
     if last_error and ("quota" in last_error.lower() or "limit" in last_error.lower()):
-        return """عذراً، وصلنا للحد اليومي للاستخدام 📊
+        return """عذراً، وصلنا للحد اليومي 📊
 
 حلول:
-1. جربي بعد 24 ساعة (يتجدد تلقائياً)
-2. اطلبي من المطور إضافة مفاتيح جديدة
+1. جربي بعد 24 ساعة
+2. أو اطلبي من المطور إضافة مفاتيح
 
 شكراً لتفهمك! 🌸"""
     
-    elif last_error and "api" in last_error.lower():
-        return """هناك مشكلة في مفاتيح API 🔑
+    elif last_error and ("404" in last_error or "not found" in last_error):
+        return """النماذج تحتاج تحديث 🔄
 
 المطور يحتاج:
-1. التحقق من Environment Variables
-2. التأكد أن المفاتيح صحيحة
-3. المفاتيح مفعّلة في Google AI Studio
+1. تحديث google-generativeai
+2. استخدام أسماء النماذج الجديدة
 
 جربي لاحقاً 💭"""
     
@@ -190,7 +184,7 @@ def get_ai_response(user_id: str, message: str) -> str:
 1. أرسلي الرسالة مرة ثانية
 2. إذا استمر، راجعي المطور
 
-آسفة على الإزعاج! 🌸"""
+آسفة! 🌸"""
 
 # ================== معالجات LINE ==================
 @app.route("/callback", methods=['POST'])
@@ -228,7 +222,7 @@ def handle_message(event):
                 )
             )
         
-        logger.info(f"✅ رد مرسل إلى {user_id[:8]}")
+        logger.info(f"✅ رد مرسل")
         
     except Exception as e:
         logger.error(f"❌ خطأ في handle_message: {e}")
@@ -238,7 +232,7 @@ def handle_message(event):
                 line_bot_api.reply_message(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[TextMessage(text="عذراً، حصل خطأ مؤقت 🔧")]
+                        messages=[TextMessage(text="عذراً، خطأ مؤقت 🔧")]
                     )
                 )
         except:
@@ -246,9 +240,6 @@ def handle_message(event):
 
 @handler.add(FollowEvent)
 def handle_follow(event):
-    user_id = event.source.user_id
-    logger.info(f"🎉 متابع جديد: {user_id}")
-    
     welcome = """مرحباً بك! أنا نور 🌟
 
 مدربتك الشخصية هنا لدعمك.
@@ -271,10 +262,11 @@ def handle_follow(event):
 def home():
     return jsonify({
         'status': 'running',
-        'bot': 'Life Coach Bot',
+        'bot': 'Life Coach Bot - FIXED',
+        'version': '2.0',
         'available_keys': len(GEMINI_KEYS),
-        'users': len(memory.conversations),
-        'note': 'Models are tested on each request'
+        'models': MODELS,
+        'users': len(memory.conversations)
     })
 
 @app.route("/health", methods=['GET'])
@@ -282,6 +274,7 @@ def health():
     return jsonify({
         'status': 'healthy',
         'keys_available': len(GEMINI_KEYS),
+        'models_count': len(MODELS),
         'timestamp': datetime.now().isoformat()
     })
 
@@ -292,8 +285,7 @@ def test_models():
     if not GEMINI_KEYS:
         return jsonify({
             'success': False,
-            'error': 'No API keys configured',
-            'hint': 'Check GEMINI_API_KEY_1 in Environment Variables'
+            'error': 'No API keys configured'
         }), 500
     
     results = {
@@ -305,7 +297,7 @@ def test_models():
     for key_idx, key in enumerate(GEMINI_KEYS):
         key_result = {
             'key_index': key_idx + 1,
-            'key_prefix': key[:15] + '...' if key else 'None',
+            'key_prefix': key[:15] + '...',
             'models': []
         }
         
@@ -361,29 +353,12 @@ def test_models():
     
     return jsonify(results)
 
-@app.route("/debug", methods=['GET'])
-def debug():
-    """معلومات تشخيصية"""
-    return jsonify({
-        'environment': {
-            'LINE_TOKEN_SET': bool(LINE_CHANNEL_ACCESS_TOKEN),
-            'LINE_SECRET_SET': bool(LINE_CHANNEL_SECRET),
-            'GEMINI_KEYS_COUNT': len(GEMINI_KEYS),
-            'GEMINI_KEYS_PREFIXES': [k[:15] + '...' for k in GEMINI_KEYS if k]
-        },
-        'models_to_try': MODELS,
-        'memory': {
-            'active_users': len(memory.conversations),
-            'total_messages': sum(len(conv) for conv in memory.conversations.values())
-        }
-    })
-
 # ================== التشغيل ==================
 if __name__ == "__main__":
     logger.info("="*60)
-    logger.info("🚀 Life Coach Bot - Working Edition")
+    logger.info("🚀 Life Coach Bot - FIXED VERSION 2.0")
     logger.info(f"🔑 مفاتيح API: {len(GEMINI_KEYS)}")
-    logger.info(f"🤖 نماذج للمحاولة: {len(MODELS)}")
+    logger.info(f"🤖 نماذج: {MODELS}")
     logger.info("="*60)
     
     port = int(os.getenv('PORT', 5000))
