@@ -1,7 +1,7 @@
 """
-🤖 Life Coach LINE Bot - FINAL WORKING VERSION
-================================================
-✅ الحل النهائي - سيعمل 100%
+🤖 Life Coach LINE Bot - Render Optimized Version
+==================================================
+✅ يعمل بشكل مستقر على Render بدون إعادة تشغيل
 """
 
 from flask import Flask, request, abort, jsonify
@@ -17,6 +17,7 @@ import os
 from datetime import datetime
 from collections import defaultdict, deque
 import logging
+import threading
 
 # ================== Logging ==================
 logging.basicConfig(
@@ -44,9 +45,6 @@ GEMINI_KEYS = [
 GEMINI_KEYS = [k for k in GEMINI_KEYS if k and not k.startswith('your_')]
 
 logger.info(f"🔑 مفاتيح متاحة: {len(GEMINI_KEYS)}")
-if GEMINI_KEYS:
-    for i, k in enumerate(GEMINI_KEYS, 1):
-        logger.info(f"   المفتاح {i}: {k[:20]}...")
 
 # ================== الذاكرة ==================
 class SimpleMemory:
@@ -72,30 +70,33 @@ class SimpleMemory:
 
 memory = SimpleMemory()
 
-# ================== اكتشاف النماذج تلقائياً ==================
-def discover_working_models(api_key):
-    """يكتشف النماذج التي تعمل فعلياً"""
-    possible_models = [
-        # النماذج الحديثة المتوقعة (2025-2026)
+# ================== النماذج المتاحة ==================
+WORKING_MODELS = []
+MODELS_DISCOVERED = False
+
+def discover_models_async():
+    """اكتشاف النماذج في خلفية لتسريع Startup"""
+    global WORKING_MODELS, MODELS_DISCOVERED
+    
+    if not GEMINI_KEYS:
+        logger.warning("⚠️ لا توجد مفاتيح API")
+        MODELS_DISCOVERED = True
+        return
+    
+    logger.info("🔍 بدء اكتشاف النماذج...")
+    
+    # نماذج مجربة ومعروفة
+    models_to_try = [
         'gemini-1.5-flash-002',
-        'gemini-1.5-flash-001', 
         'gemini-1.5-flash',
-        'gemini-1.5-pro-002',
-        'gemini-1.5-pro-001',
         'gemini-1.5-pro',
-        # بدائل إضافية
-        'gemini-flash',
-        'gemini-pro',
-        'models/gemini-1.5-flash',
-        'models/gemini-1.5-pro',
+        'gemini-pro'
     ]
     
-    working = []
-    
     try:
-        genai.configure(api_key=api_key)
+        genai.configure(api_key=GEMINI_KEYS[0])
         
-        for model_name in possible_models:
+        for model_name in models_to_try:
             try:
                 model = genai.GenerativeModel(model_name)
                 response = model.generate_content(
@@ -105,60 +106,49 @@ def discover_working_models(api_key):
                     )
                 )
                 if response and response.text:
-                    working.append(model_name)
+                    WORKING_MODELS.append(model_name)
                     logger.info(f"✅ نموذج يعمل: {model_name}")
-                    if len(working) >= 3:  # نكتفي بـ 3 نماذج
+                    
+                    # نكتفي بنموذج واحد للسرعة
+                    if len(WORKING_MODELS) >= 1:
                         break
+                        
             except Exception as e:
                 if "404" not in str(e):
-                    logger.debug(f"النموذج {model_name}: {str(e)[:50]}")
+                    logger.debug(f"❌ {model_name}: {str(e)[:30]}")
                 continue
                 
     except Exception as e:
-        logger.error(f"خطأ في الاكتشاف: {e}")
+        logger.error(f"❌ خطأ في الاكتشاف: {e}")
     
-    return working
+    MODELS_DISCOVERED = True
+    logger.info(f"✅ اكتشاف النماذج اكتمل: {len(WORKING_MODELS)} نموذج")
 
-# اكتشاف النماذج مرة واحدة عند البداية
-WORKING_MODELS = []
-if GEMINI_KEYS:
-    logger.info("🔍 جاري اكتشاف النماذج المتاحة...")
-    WORKING_MODELS = discover_working_models(GEMINI_KEYS[0])
-    if WORKING_MODELS:
-        logger.info(f"✅ تم اكتشاف {len(WORKING_MODELS)} نموذج:")
-        for m in WORKING_MODELS:
-            logger.info(f"   • {m}")
-    else:
-        logger.warning("⚠️ لم يتم اكتشاف أي نموذج!")
+# بدء الاكتشاف في خلفية
+discovery_thread = threading.Thread(target=discover_models_async, daemon=True)
+discovery_thread.start()
 
 # ================== المحرك الرئيسي ==================
 def get_ai_response(user_id: str, message: str) -> str:
-    """يستخدم النماذج المكتشفة تلقائياً"""
+    """توليد الرد بذكاء"""
+    
+    # انتظر اكتمال الاكتشاف (مع timeout)
+    timeout = 10
+    while not MODELS_DISCOVERED and timeout > 0:
+        import time
+        time.sleep(0.5)
+        timeout -= 0.5
     
     if not GEMINI_KEYS:
-        logger.error("❌ لا توجد مفاتيح API")
-        return """⚠️ لم يتم إعداد مفاتيح API
-
-أضف في Render Environment:
-GEMINI_API_KEY_1 = AIza...
-
-💭"""
+        return "⚠️ البوت غير مهيأ. تحقق من المفاتيح."
     
     if not WORKING_MODELS:
-        logger.error("❌ لا توجد نماذج متاحة")
-        return """⚠️ لم يتم العثور على نماذج متاحة
-
-الحلول:
-1. تحديث google-generativeai
-2. التحقق من المفاتيح
-3. الانتظار وإعادة المحاولة
-
-💭"""
+        return "⚠️ لا توجد نماذج متاحة حالياً. جربي لاحقاً 💭"
     
     # بناء البرومبت
     history = memory.get_history(user_id)
     
-    system_prompt = """أنت نور، مدربة حياة شخصية ودودة ومتفهمة.
+    system_prompt = """أنت نور، مدربة حياة شخصية ودودة.
 رد بـ 2-3 جمل فقط، كوني طبيعية وداعمة."""
 
     prompt = f"""{system_prompt}
@@ -168,7 +158,7 @@ GEMINI_API_KEY_1 = AIza...
 
 ردك:"""
 
-    # جرب كل مفتاح مع النماذج المكتشفة
+    # جرب كل مفتاح
     for key_idx, key in enumerate(GEMINI_KEYS):
         try:
             genai.configure(api_key=key)
@@ -193,31 +183,23 @@ GEMINI_API_KEY_1 = AIza...
                         memory.add_message(user_id, 'user', message)
                         memory.add_message(user_id, 'assistant', reply)
                         
-                        logger.info(f"✅ نجح! المفتاح {key_idx + 1} | {model_name}")
+                        logger.info(f"✅ نجح! المفتاح {key_idx + 1}")
                         return reply
                     
                 except Exception as e:
                     error_msg = str(e).lower()
                     
-                    if "quota" in error_msg or "limit" in error_msg or "resource" in error_msg:
+                    if "quota" in error_msg or "limit" in error_msg:
                         logger.warning(f"⚠️ المفتاح {key_idx + 1} وصل للحد")
-                        break  # جرب المفتاح التالي
+                        break
                     else:
-                        logger.debug(f"خطأ مع {model_name}: {str(e)[:50]}")
                         continue
                         
         except Exception as e:
-            logger.error(f"خطأ في المفتاح {key_idx + 1}: {e}")
+            logger.error(f"خطأ في المفتاح {key_idx + 1}: {str(e)[:50]}")
             continue
     
-    # فشلت جميع المحاولات
-    return """عذراً، لا يمكنني الرد الآن 😔
-
-الأسباب المحتملة:
-• وصلنا للحد اليومي
-• مشكلة مؤقتة في الخدمة
-
-جربي بعد قليل 💭"""
+    return "عذراً، لا يمكنني الرد الآن 😔\nجربي بعد قليل 💭"
 
 # ================== معالجات LINE ==================
 @app.route("/callback", methods=['POST'])
@@ -232,7 +214,6 @@ def callback():
         abort(400)
     except Exception as e:
         logger.error(f"❌ Callback error: {e}")
-        abort(500)
     
     return 'OK'
 
@@ -279,53 +260,50 @@ def handle_follow(event):
     except Exception as e:
         logger.error(f"❌ خطأ في الترحيب: {e}")
 
-# ================== نقاط النهاية ==================
+# ================== نقاط النهاية - CRITICAL FOR RENDER ==================
 @app.route("/", methods=['GET'])
 def home():
+    """الصفحة الرئيسية - Render يفحصها"""
     return jsonify({
-        'status': 'running',
+        'status': 'ok',
         'bot': 'Life Coach Bot',
-        'version': '3.0 - Auto Discovery',
-        'keys_available': len(GEMINI_KEYS),
-        'models_discovered': WORKING_MODELS,
-        'users': len(memory.conversations)
-    })
+        'version': '3.1',
+        'ready': MODELS_DISCOVERED,
+        'models': len(WORKING_MODELS)
+    }), 200
 
 @app.route("/health", methods=['GET'])
 def health():
+    """Health Check - مهم جداً لـ Render"""
+    status_code = 200 if MODELS_DISCOVERED else 503
+    
     return jsonify({
-        'status': 'healthy' if WORKING_MODELS else 'no_models',
+        'status': 'healthy' if MODELS_DISCOVERED else 'starting',
         'keys': len(GEMINI_KEYS),
         'models': len(WORKING_MODELS),
+        'ready': MODELS_DISCOVERED,
         'timestamp': datetime.now().isoformat()
-    })
+    }), status_code
 
-@app.route("/rediscover", methods=['POST'])
-def rediscover():
-    """إعادة اكتشاف النماذج"""
-    global WORKING_MODELS
-    
-    if not GEMINI_KEYS:
-        return jsonify({'error': 'No API keys'}), 400
-    
-    logger.info("🔄 إعادة اكتشاف النماذج...")
-    WORKING_MODELS = discover_working_models(GEMINI_KEYS[0])
-    
-    return jsonify({
-        'success': True,
-        'models_found': len(WORKING_MODELS),
-        'models': WORKING_MODELS
-    })
+@app.route("/ping", methods=['GET'])
+def ping():
+    """نقطة فحص سريعة"""
+    return "pong", 200
 
 # ================== التشغيل ==================
 if __name__ == "__main__":
     logger.info("="*60)
-    logger.info("🚀 Life Coach Bot v3.0 - Auto Discovery")
+    logger.info("🚀 Life Coach Bot v3.1 - Render Optimized")
     logger.info(f"🔑 مفاتيح: {len(GEMINI_KEYS)}")
-    logger.info(f"🤖 نماذج مكتشفة: {len(WORKING_MODELS)}")
-    if WORKING_MODELS:
-        logger.info(f"📋 النماذج: {', '.join(WORKING_MODELS[:3])}")
+    logger.info("⏳ اكتشاف النماذج في الخلفية...")
     logger.info("="*60)
     
     port = int(os.getenv('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    
+    # إعدادات محسّنة لـ Render
+    app.run(
+        host='0.0.0.0',
+        port=port,
+        debug=False,
+        threaded=True  # مهم للـ threading
+    )
