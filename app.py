@@ -75,7 +75,7 @@ def get_reply(user_id, message):
         return "⚠️ البوت غير مهيأ"
     
     # Models to try in order of preference
-    models = ['gemini-1.5-flash-002', 'gemini-1.5-flash', 'gemini-pro']
+    models = ['gemini-1.5-flash-002', 'gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-pro']
     
     history = memory.get(user_id)
     prompt = f"""أنت نور، مدربة حياة ودودة. رد بـ 2-3 جمل.
@@ -85,13 +85,19 @@ def get_reply(user_id, message):
 
 ردك:"""
 
+    last_error = None
+    
     # Try all keys and models
     for key_idx, key in enumerate(GEMINI_KEYS):
+        logger.info(f"🔑 Trying key #{key_idx+1}")
+        
         try:
             genai.configure(api_key=key)
             
             for model_name in models:
                 try:
+                    logger.info(f"🤖 Trying model: {model_name}")
+                    
                     model = genai.GenerativeModel(model_name)
                     response = model.generate_content(
                         prompt,
@@ -105,22 +111,49 @@ def get_reply(user_id, message):
                         reply = response.text.strip()
                         memory.add(user_id, 'user', message)
                         memory.add(user_id, 'assistant', reply)
-                        logger.info(f"✅ Response generated using key {key_idx+1}, model {model_name}")
+                        logger.info(f"✅ SUCCESS with key #{key_idx+1}, model: {model_name}")
                         return reply
                 
                 except Exception as model_error:
-                    error_str = str(model_error).lower()
-                    if "quota" in error_str or "limit" in error_str or "resource" in error_str:
-                        logger.warning(f"⚠️ Key {key_idx+1} quota exceeded, trying next key...")
+                    error_str = str(model_error)
+                    error_lower = error_str.lower()
+                    
+                    # Log the ACTUAL error
+                    logger.error(f"❌ Key #{key_idx+1}, Model {model_name} FAILED:")
+                    logger.error(f"   Error type: {type(model_error).__name__}")
+                    logger.error(f"   Error message: {error_str[:200]}")
+                    
+                    last_error = error_str
+                    
+                    # Check if quota/limit issue
+                    if any(x in error_lower for x in ["quota", "limit", "resource", "exhausted"]):
+                        logger.warning(f"⚠️ Key #{key_idx+1} QUOTA EXCEEDED, trying next key...")
                         break  # Try next key
-                    logger.debug(f"Model {model_name} failed: {model_error}")
-                    continue  # Try next model
+                    
+                    # Check if invalid API key
+                    if any(x in error_lower for x in ["invalid", "api_key", "unauthorized", "403"]):
+                        logger.error(f"🚫 Key #{key_idx+1} is INVALID!")
+                        break  # Try next key
+                    
+                    # Check if model not found
+                    if "404" in error_lower or "not found" in error_lower:
+                        logger.warning(f"⚠️ Model {model_name} not available, trying next model...")
+                        continue  # Try next model
+                    
+                    # Unknown error, try next model
+                    continue
         
         except Exception as key_error:
-            logger.error(f"❌ Key {key_idx+1} failed: {key_error}")
+            logger.error(f"❌ Key #{key_idx+1} CONFIGURATION FAILED: {key_error}")
             continue
     
-    logger.error("❌ All keys and models exhausted")
+    # All attempts failed
+    logger.error("="*60)
+    logger.error("❌ ALL KEYS AND MODELS EXHAUSTED!")
+    if last_error:
+        logger.error(f"Last error seen: {last_error[:300]}")
+    logger.error("="*60)
+    
     return "عذراً، لا يمكنني الرد الآن 😔\nجربي بعد قليل 💭"
 
 # ================== LINE Handlers ==================
@@ -209,6 +242,32 @@ def health():
 @app.route("/ping")
 def ping():
     return "pong", 200
+
+# ================== Test Endpoint (للتشخيص فقط) ==================
+@app.route("/test-gemini")
+def test_gemini():
+    """اختبار سريع لمفاتيح Gemini"""
+    results = []
+    
+    for idx, key in enumerate(GEMINI_KEYS):
+        try:
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel('gemini-pro')
+            response = model.generate_content("مرحبا")
+            
+            results.append({
+                'key': f"Key #{idx+1}",
+                'status': 'working',
+                'response': response.text[:50]
+            })
+        except Exception as e:
+            results.append({
+                'key': f"Key #{idx+1}",
+                'status': 'failed',
+                'error': str(e)[:200]
+            })
+    
+    return jsonify(results), 200
 
 # ================== Startup ==================
 logger.info("="*60)
