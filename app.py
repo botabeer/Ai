@@ -1,7 +1,7 @@
 """
 🤖 Life Coach LINE Bot - Ultra Simple & Stable
 ===============================================
-✅ نسخة مبسطة تعمل 100% على Render
+✅ نسخة محدثة لـ Gemini 2026 Models
 """
 
 from flask import Flask, request, abort, jsonify
@@ -74,8 +74,14 @@ def get_reply(user_id, message):
     if not GEMINI_KEYS:
         return "⚠️ البوت غير مهيأ"
     
-    # Models to try in order of preference
-    models = ['gemini-1.5-flash-002', 'gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-pro']
+    # ✅ الأسماء الصحيحة لنماذج Gemini 2026
+    # من الأسرع والأرخص إلى الأقوى
+    models = [
+        'gemini-2.0-flash-exp',      # أسرع وأرخص (تجريبي)
+        'gemini-2.0-flash',           # سريع ومستقر
+        'gemini-1.5-flash-latest',    # متوفر للجميع
+        'gemini-1.5-pro-latest',      # أقوى لكن أبطأ
+    ]
     
     history = memory.get(user_id)
     prompt = f"""أنت نور، مدربة حياة ودودة. رد بـ 2-3 جمل.
@@ -120,8 +126,7 @@ def get_reply(user_id, message):
                     
                     # Log the ACTUAL error
                     logger.error(f"❌ Key #{key_idx+1}, Model {model_name} FAILED:")
-                    logger.error(f"   Error type: {type(model_error).__name__}")
-                    logger.error(f"   Error message: {error_str[:200]}")
+                    logger.error(f"   Error: {error_str[:200]}")
                     
                     last_error = error_str
                     
@@ -151,7 +156,7 @@ def get_reply(user_id, message):
     logger.error("="*60)
     logger.error("❌ ALL KEYS AND MODELS EXHAUSTED!")
     if last_error:
-        logger.error(f"Last error seen: {last_error[:300]}")
+        logger.error(f"Last error: {last_error[:300]}")
     logger.error("="*60)
     
     return "عذراً، لا يمكنني الرد الآن 😔\nجربي بعد قليل 💭"
@@ -229,7 +234,7 @@ def home():
     return jsonify({
         'status': 'ok',
         'bot': 'Life Coach Bot',
-        'version': '1.0'
+        'version': '2.0'
     }), 200
 
 @app.route("/health")
@@ -243,37 +248,92 @@ def health():
 def ping():
     return "pong", 200
 
-# ================== Test Endpoint (للتشخيص فقط) ==================
+# ================== Test Endpoints ==================
 @app.route("/test-gemini")
 def test_gemini():
     """اختبار سريع لمفاتيح Gemini"""
     results = []
     
+    test_models = [
+        'gemini-2.0-flash-exp',
+        'gemini-2.0-flash',
+        'gemini-1.5-flash-latest',
+        'gemini-1.5-pro-latest'
+    ]
+    
     for idx, key in enumerate(GEMINI_KEYS):
+        key_result = {'key': f"Key #{idx+1}", 'models': []}
+        
         try:
             genai.configure(api_key=key)
-            model = genai.GenerativeModel('gemini-pro')
-            response = model.generate_content("مرحبا")
             
-            results.append({
-                'key': f"Key #{idx+1}",
-                'status': 'working',
-                'response': response.text[:50]
-            })
+            for model_name in test_models:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content(
+                        "مرحبا",
+                        generation_config=genai.types.GenerationConfig(
+                            max_output_tokens=10
+                        )
+                    )
+                    
+                    key_result['models'].append({
+                        'name': model_name,
+                        'status': '✅ working',
+                        'sample': response.text[:30]
+                    })
+                    
+                except Exception as e:
+                    key_result['models'].append({
+                        'name': model_name,
+                        'status': '❌ failed',
+                        'error': str(e)[:100]
+                    })
+            
+            results.append(key_result)
+            
         except Exception as e:
             results.append({
                 'key': f"Key #{idx+1}",
                 'status': 'failed',
-                'error': str(e)[:200]
+                'error': str(e)[:100]
             })
     
     return jsonify(results), 200
+
+@app.route("/list-models")
+def list_models():
+    """عرض جميع النماذج المتاحة"""
+    if not GEMINI_KEYS:
+        return jsonify({'error': 'No API keys'}), 400
+    
+    try:
+        genai.configure(api_key=GEMINI_KEYS[0])
+        models = genai.list_models()
+        
+        available = []
+        for m in models:
+            if 'generateContent' in m.supported_generation_methods:
+                available.append({
+                    'name': m.name,
+                    'display_name': m.display_name,
+                    'description': m.description
+                })
+        
+        return jsonify({
+            'total': len(available),
+            'models': available
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # ================== Startup ==================
 logger.info("="*60)
 logger.info("🚀 Life Coach Bot Starting...")
 logger.info(f"🔑 Gemini Keys: {len(GEMINI_KEYS)}")
 logger.info(f"✅ LINE Config: OK")
+logger.info(f"📅 Using 2026 Gemini Models")
 logger.info("="*60)
 
 # ⚠️ هذا الجزء فقط للتطوير المحلي
