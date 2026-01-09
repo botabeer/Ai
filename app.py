@@ -18,7 +18,10 @@ from collections import defaultdict, deque
 import logging
 
 # ================== Setup ==================
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -26,6 +29,10 @@ app = Flask(__name__)
 # ================== Config ==================
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
+
+if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
+    logger.error("❌ Missing LINE credentials!")
+    raise ValueError("LINE credentials not found in environment")
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -38,7 +45,11 @@ GEMINI_KEYS = [
 ]
 GEMINI_KEYS = [k for k in GEMINI_KEYS if k and not k.startswith('your_')]
 
-logger.info(f"🔑 Keys: {len(GEMINI_KEYS)}")
+if not GEMINI_KEYS:
+    logger.error("❌ No valid Gemini API keys!")
+    raise ValueError("At least one Gemini API key is required")
+
+logger.info(f"🔑 Loaded {len(GEMINI_KEYS)} Gemini API key(s)")
 
 # ================== Memory ==================
 class Memory:
@@ -63,7 +74,7 @@ def get_reply(user_id, message):
     if not GEMINI_KEYS:
         return "⚠️ البوت غير مهيأ"
     
-    # Models to try
+    # Models to try in order of preference
     models = ['gemini-1.5-flash-002', 'gemini-1.5-flash', 'gemini-pro']
     
     history = memory.get(user_id)
@@ -75,7 +86,7 @@ def get_reply(user_id, message):
 ردك:"""
 
     # Try all keys and models
-    for key in GEMINI_KEYS:
+    for key_idx, key in enumerate(GEMINI_KEYS):
         try:
             genai.configure(api_key=key)
             
@@ -94,17 +105,22 @@ def get_reply(user_id, message):
                         reply = response.text.strip()
                         memory.add(user_id, 'user', message)
                         memory.add(user_id, 'assistant', reply)
-                        logger.info(f"✅ Success")
+                        logger.info(f"✅ Response generated using key {key_idx+1}, model {model_name}")
                         return reply
                 
-                except Exception as e:
-                    if "quota" in str(e).lower() or "limit" in str(e).lower():
+                except Exception as model_error:
+                    error_str = str(model_error).lower()
+                    if "quota" in error_str or "limit" in error_str or "resource" in error_str:
+                        logger.warning(f"⚠️ Key {key_idx+1} quota exceeded, trying next key...")
                         break  # Try next key
-                    continue
+                    logger.debug(f"Model {model_name} failed: {model_error}")
+                    continue  # Try next model
         
-        except:
+        except Exception as key_error:
+            logger.error(f"❌ Key {key_idx+1} failed: {key_error}")
             continue
     
+    logger.error("❌ All keys and models exhausted")
     return "عذراً، لا يمكنني الرد الآن 😔\nجربي بعد قليل 💭"
 
 # ================== LINE Handlers ==================
@@ -113,10 +129,16 @@ def callback():
     signature = request.headers.get('X-Line-Signature', '')
     body = request.get_data(as_text=True)
     
+    logger.info(f"📨 Received webhook request")
+    
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
+        logger.error("❌ Invalid signature")
         abort(400)
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}")
+        abort(500)
     
     return 'OK'
 
@@ -126,10 +148,13 @@ def handle_message(event):
         user_id = event.source.user_id
         message = event.message.text.strip()
         
-        logger.info(f"📨 {message[:40]}")
+        logger.info(f"📩 Message from {user_id[:8]}...: {message[:40]}")
         
+        # Generate reply
         reply = get_reply(user_id, message)
+        logger.info(f"💬 Reply: {reply[:40]}")
         
+        # Send reply
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.reply_message(
@@ -138,14 +163,19 @@ def handle_message(event):
                     messages=[TextMessage(text=reply)]
                 )
             )
+        
+        logger.info("✅ Reply sent successfully")
+        
     except Exception as e:
-        logger.error(f"❌ {e}")
+        logger.error(f"❌ Error handling message: {e}", exc_info=True)
 
 @handler.add(FollowEvent)
 def handle_follow(event):
     welcome = "مرحباً بك! أنا نور 🌟\n\nمدربتك الشخصية هنا لدعمك.\nشاركيني ما في بالك 💭"
     
     try:
+        logger.info(f"👋 New follower: {event.source.user_id[:8]}...")
+        
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.reply_message(
@@ -154,24 +184,42 @@ def handle_follow(event):
                     messages=[TextMessage(text=welcome)]
                 )
             )
+        
+        logger.info("✅ Welcome message sent")
+        
     except Exception as e:
-        logger.error(f"❌ {e}")
+        logger.error(f"❌ Error sending welcome: {e}")
 
 # ================== Health Endpoints ==================
 @app.route("/")
 def home():
-    return jsonify({'status': 'ok', 'bot': 'running'}), 200
+    return jsonify({
+        'status': 'ok',
+        'bot': 'Life Coach Bot',
+        'version': '1.0'
+    }), 200
 
 @app.route("/health")
 def health():
-    return jsonify({'status': 'healthy'}), 200
+    return jsonify({
+        'status': 'healthy',
+        'gemini_keys': len(GEMINI_KEYS)
+    }), 200
 
 @app.route("/ping")
 def ping():
     return "pong", 200
 
-# ================== Run ==================
+# ================== Startup ==================
+logger.info("="*60)
+logger.info("🚀 Life Coach Bot Starting...")
+logger.info(f"🔑 Gemini Keys: {len(GEMINI_KEYS)}")
+logger.info(f"✅ LINE Config: OK")
+logger.info("="*60)
+
+# ⚠️ هذا الجزء فقط للتطوير المحلي
+# على Render سيتم تشغيل التطبيق بواسطة gunicorn من Procfile
 if __name__ == "__main__":
-    logger.info("🚀 Bot Starting...")
-    port = int(os.getenv('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    port = int(os.getenv('PORT', 5000))
+    logger.info(f"🏃 Running in development mode on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
