@@ -3,11 +3,24 @@ services:
     name: life-coach-bot
     env: python
     plan: free
-    # إعدادات محسّنة للاستقرار
-    healthCheckPath: /health
+    region: singapore
+    
+    # Build settings
+    buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 120 --log-level info
     
-    # متغيرات البيئة (ضعها في Render Dashboard)
+    # Health check
+    healthCheckPath: /health
+    
+    # Auto-deploy settings
+    autoDeploy: true
+    
+    # Environment variables
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
+      
+      # ⚠️ أضف هذه في Render Dashboard:
+      # LINE_CHANNEL_ACCESS_TOKEN
+      # LINE_CHANNEL_SECRET
+      # GROQ_API_KEY
