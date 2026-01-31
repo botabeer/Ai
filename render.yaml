@@ -1,26 +1,32 @@
 services:
   - type: web
-    name: life-coach-bot
+    name: life-coach-bot-noor
     env: python
     plan: free
     region: singapore
     
-    # Build settings
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 120 --log-level info
+    # Build Configuration
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120 --log-level info
     
-    # Health check
+    # Health Check
     healthCheckPath: /health
     
-    # Auto-deploy settings
+    # Auto Deploy
     autoDeploy: true
     
-    # Environment variables
+    # Environment Variables
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
       
-      # ⚠️ أضف هذه في Render Dashboard:
-      # LINE_CHANNEL_ACCESS_TOKEN
-      # LINE_CHANNEL_SECRET
-      # GROQ_API_KEY
+      - key: ENVIRONMENT
+        value: production
+      
+      - key: LOG_LEVEL
+        value: INFO
+      
+      # ⚠️ ADD THESE IN RENDER DASHBOARD:
+      # LINE_CHANNEL_ACCESS_TOKEN - Get from LINE Developers Console
+      # LINE_CHANNEL_SECRET - Get from LINE Developers Console
+      # GROQ_API_KEY - Get from console.groq.com/keys
